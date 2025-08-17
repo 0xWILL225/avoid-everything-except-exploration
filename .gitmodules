@@ -1,0 +1,3 @@
+[submodule "robofin"]
+	path = robofin
+	url = git@github.com:0xWILL225/robofin.git
