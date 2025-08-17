@@ -1,0 +1,66 @@
+# MIT License
+#
+# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+training_model_parameters:
+  robot_dof: 6
+  collision_loss_weight: 5
+  point_match_loss_weight: 1
+  collision_loss_margin: 0.03
+  min_lr: 1.0e-5
+  max_lr: 5.0e-5
+  warmup_steps: 5000
+  decay_rate: null # 0.999
+  pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
+  train_batch_size: 10
+  disable_viz: true
+
+data_module_parameters:
+  # data_dir: /workspace/datasets/mpinets_global_training_data/global_dataset_6540000
+  # data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
+  data_dir: /workspace/datasets/gp7_cubby_data
+  # train_trajectory_key: "robot_configurations" # for mpinets data
+  train_trajectory_key: "global_solutions"
+  val_trajectory_key: "global_solutions"
+  num_obstacle_points: 4096
+  random_scale: 0.015
+  num_target_points: 128
+
+shared_parameters:
+  num_robot_points: 2048
+  action_chunk_length: 1
+  # urdf_path: /workspace/assets/panda/panda_spheres.urdf
+  urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+
+num_workers: 6
+checkpoint_interval: 60
+val_every_n_epochs: 1
+gpus: 1
+train_batch_size: 10
+val_batch_size: 10
+max_epochs: 100
+use_simple_model: false
+stop_early: false
+mintest: false
+no_logging: false
+save_checkpoint_dir: /workspace/checkpoints
+experiment_name: "Cretin: Avoid Everything GP7 test"
+description: "Testing training with GP7 robot and dataset"

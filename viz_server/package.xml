@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>viz_server</name>
+  <version>0.1.0</version>
+  <description>ROS 2 visualization server with ZeroMQ bridge</description>
+
+  <maintainer email="wejacobsson@gmail.com"></maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- runtime deps -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>pyzmq</exec_depend>
+  <exec_depend>fasteners</exec_depend>
+  <exec_depend>urdf_parser_py</exec_depend>
+</package>

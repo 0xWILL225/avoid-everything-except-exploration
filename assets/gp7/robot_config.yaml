@@ -1,0 +1,7 @@
+robot_config:
+  tcp_link_name: "tool_center_point"    # defines the pose of the tool center point
+  base_link_name: "Base"
+  eef_links: ["flange", "torch", "tool_center_point"] # links belonging to the end effector (only fixed or auxiliary joints between them)
+  auxiliary_joint_names: []  # joints not controlled by neural network
+  auxiliary_joints_values: []  # default values of auxiliary joints
+  neutral_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # in order of how non-auxiliary joints are defined in urdf

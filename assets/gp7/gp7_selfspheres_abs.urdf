@@ -1,0 +1,150 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="gp7">
+  <link name="Base">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_base_axis.stl" />
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.164472" /></geometry><origin xyz="-0.001641 -0.000214 0.090296" rpy="0 0 0" /></collision></link>
+  <link name="vendor_base_link" />
+  <link name="Link1">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_s_axis.stl" />
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.11895" /></geometry><origin xyz="-0.000119 0.0 0.261213" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.079117" /></geometry><origin xyz="0.040256 0.036395 0.332484" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.078406" /></geometry><origin xyz="0.040256 -0.036395 0.332484" rpy="0 0 0" /></collision></link>
+  <link name="Link2">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_l_axis.stl" />
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.102818" /></geometry><origin xyz="-0.032775 -0.068236 0.22181" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.094131" /></geometry><origin xyz="-0.025394 -0.080601 0.375909" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.093407" /></geometry><origin xyz="-0.03413 -0.068914 0.112765" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.086461" /></geometry><origin xyz="-0.042941 0.001266 0.175065" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.102818" /></geometry><origin xyz="-0.032775 0.068236 0.22181" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.059744" /></geometry><origin xyz="0.002207 -0.083922 0.44615" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.059744" /></geometry><origin xyz="0.002207 0.083922 0.44615" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.094131" /></geometry><origin xyz="-0.025394 0.080601 0.375909" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.093407" /></geometry><origin xyz="-0.03413 0.068914 0.112765" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.08691" /></geometry><origin xyz="-0.00318 0.085804 0.011935" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.08691" /></geometry><origin xyz="-0.00318 -0.085804 0.011935" rpy="0 0 0" /></collision></link>
+  <link name="Link3">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_u_axis.stl" />
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.115977" /></geometry><origin xyz="-0.017356 -0.001491 0.018327" rpy="0 0 0" /></collision></link>
+  <link name="Link4">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_r_axis.stl" />
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.06667" /></geometry><origin xyz="0.112197 0.0 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.071966" /></geometry><origin xyz="0.181762 0.0 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.075208" /></geometry><origin xyz="0.250897 0.0 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.074723" /></geometry><origin xyz="0.31287 0.0 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.073844" /></geometry><origin xyz="0.364538 0.0 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.057088" /></geometry><origin xyz="0.428115 -0.016847 0.0" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.057152" /></geometry><origin xyz="0.427751 0.014466 0.0" rpy="0 0 0" /></collision></link>
+  <link name="Link5">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_b_axis.stl" />
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.053627" /></geometry><origin xyz="0.000172 -2e-06 -1e-05" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.045624" /></geometry><origin xyz="0.048766 0.0 0.0" rpy="0 0 0" /></collision></link>
+  <link name="Link6">
+    <visual>
+      <geometry>
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/gp7_t_axis.stl" />
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.033324" /></geometry><origin xyz="-0.014006 4e-06 -2.4e-05" rpy="0 0 0" /></collision></link>
+  <link name="flange" />
+  <link name="torch">
+    <visual>
+      <geometry>
+        
+        <mesh filename="file:///workspace/assets/gp7/meshes/visual/torch_visual_shortened_head.stl" />
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1" />
+      </material>
+    </visual>
+    <collision><geometry><sphere radius="0.059426" /></geometry><origin xyz="0.0 -0.00102 0.0544" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.046906" /></geometry><origin xyz="-0.000376 0.013972 0.127321" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.020105" /></geometry><origin xyz="0.0 0.067457 0.352698" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.02004" /></geometry><origin xyz="-0.0 0.055643 0.379078" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.052295" /></geometry><origin xyz="0.0 0.090849 0.128805" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.02839" /></geometry><origin xyz="0.0 0.094363 0.181438" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.021893" /></geometry><origin xyz="0.0 0.095447 0.219442" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.023401" /></geometry><origin xyz="0.0 0.094379 0.250682" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.022797" /></geometry><origin xyz="0.0 0.092331 0.284823" rpy="0 0 0" /></collision><collision><geometry><sphere radius="0.022531" /></geometry><origin xyz="0.0 0.082766 0.319009" rpy="0 0 0" /></collision></link>
+  <link name="tool_center_point" />
+  
+  <joint name="RevoluteJoint1" type="revolute">
+    <parent link="Base" />
+    <child link="Link1" />
+    <origin xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="1" lower="-2.96705961" upper="2.96705961" velocity="6.544984694978735" />
+  </joint>
+  <joint name="joint_vendor_base" type="fixed">
+    <parent link="Base" />
+    <child link="vendor_base_link" />
+    <origin xyz="0 0 0.330" />
+  </joint>
+  <joint name="RevoluteJoint2" type="revolute">
+    <parent link="Link1" />
+    <child link="Link2" />
+    <origin xyz="0.040 0 0.330" />
+    <axis xyz="0 1 0" />
+    <limit effort="1" lower="-2.53072739" upper="1.13446403" velocity="5.497787143782138" />
+  </joint>
+  <joint name="RevoluteJoint3" type="revolute">
+    <parent link="Link2" />
+    <child link="Link3" />
+    <origin xyz="0 0 0.445" />
+    <axis xyz="0 -1 0" />
+    <limit effort="1" lower="-1.22173047" upper="3.31612563" velocity="7.155849933176751" />
+  </joint>
+  <joint name="RevoluteJoint4" type="revolute">
+    <parent link="Link3" />
+    <child link="Link4" />
+    <origin xyz="0.0 0 0.040" />
+    <axis xyz="-1 0 0" />
+    <limit effort="1" lower="-3.31612563" upper="3.31612563" velocity="9.599310885968812" />
+  </joint>
+  <joint name="RevoluteJoint5" type="revolute">
+    <parent link="Link4" />
+    <child link="Link5" />
+    <origin xyz="0.440 0 0" />
+    <axis xyz="0 -1 0" />
+    <limit effort="1" lower="-2.3561945" upper="2.3561945" velocity="9.599310885968812" />
+  </joint>
+  <joint name="RevoluteJoint6" type="revolute">
+    <parent link="Link5" />
+    <child link="Link6" />
+    <origin xyz="0.080 0 0" />
+    <axis xyz="-1 0 0" />
+    <limit effort="1" lower="-6.28318548" upper="6.28318548" velocity="17.453292519943293" />
+  </joint>
+  <joint name="FixedJoint1" type="fixed">
+    <parent link="Link6" />
+    <child link="flange" />
+    <origin rpy="0 -1.5707963267948966 3.141592653589793" />
+  </joint>
+  <joint name="TorchJoint" type="fixed">
+    <parent link="flange" />
+    <child link="torch" />
+    <origin rpy="0 0 -1.5707963267948966" xyz="0 0 -0.015262616184248623" />
+  </joint>
+  <joint name="FixedJoint2" type="fixed">
+    <parent link="torch" />
+    <child link="tool_center_point" />
+    <origin rpy="0.349066 0 0" xyz="0 0.0495 0.398" />
+  </joint>
+</robot>

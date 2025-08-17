@@ -1,0 +1,11 @@
+*__pycache__
+datasets/*
+lightning_logs/*
+wandb/*
+# assets/*
+checkpoints/*
+.pylint.d/
+*.egg-info
+build
+log
+install
