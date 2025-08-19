@@ -21,8 +21,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 from typing import Tuple
-
-import lightning.pytorch as pl
 import numpy as np
 import torch
 from torch import nn
@@ -157,7 +155,7 @@ class MPiFormerPointNet(nn.Module):
         return x, pos
 
 
-class MotionPolicyTransformer(pl.LightningModule):
+class MotionPolicyTransformer(nn.Module):
     """
     The MPiFormer architecture described by Fishman, et al.
 
@@ -228,14 +226,15 @@ class MotionPolicyTransformer(pl.LightningModule):
         ).transpose(0, 1)
 
         # Indicator embeddings to label the token type
+        dev = point_cloud.device
         pc_type_emb = self.token_type_embedding(
-            torch.tensor(0, dtype=torch.long, device=self.device)
+            torch.tensor(0, dtype=torch.long, device=dev)
         )
         joint_state_type_emb = self.token_type_embedding(
-            torch.tensor(1, dtype=torch.long, device=self.device)
+            torch.tensor(1, dtype=torch.long, device=dev)
         )[None, None, :]
         action_type_emb = self.token_type_embedding(
-            torch.tensor(2, dtype=torch.long, device=self.device)
+            torch.tensor(2, dtype=torch.long, device=dev)
         )[None, None, :]
 
         pos_emb = torch.cat(

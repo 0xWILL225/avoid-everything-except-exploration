@@ -30,13 +30,15 @@ import gc
 from pathlib import Path
 from typing import Any, Dict, Optional
 import psutil
+from tqdm import tqdm
+import time
 
-import lightning.pytorch as pl
+from termcolor import cprint
+from lightning.fabric import Fabric
 import numpy as np
 import torch
 import yaml
-from lightning.pytorch.callbacks import ModelCheckpoint, StochasticWeightAveraging
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import WandbLogger  # Fabric can use PL loggers
 
 from avoid_everything.data_loader import DataModule
 from avoid_everything.pretraining import PretrainingMotionPolicyTransformer
@@ -66,81 +68,26 @@ def log_memory_usage(stage: str):
     cpu_memory = psutil.virtual_memory().used / 1024**3  # GB
     cpu_percent = psutil.virtual_memory().percent
     
-    pl.utilities.rank_zero_info(
+    print(
         f"[{stage}] Memory usage - "
         f"CPU: {cpu_memory:.1f}GB ({cpu_percent:.1f}%), "
         f"GPU: {gpu_memory:.1f}GB allocated, {gpu_reserved:.1f}GB reserved"
     )
 
 
-def setup_trainer(
-    val_every_n_batches: int | None,
-    val_every_n_epochs: int | None,
-    max_epochs: int,
-    logger: Optional[WandbLogger],
-) -> pl.Trainer:
-    args: Dict[str, Any] = {}
+def setup_fabric() -> Fabric:
+    accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+    return Fabric(accelerator=accelerator, devices=1)
 
-    if val_every_n_batches is not None:
-        assert val_every_n_epochs is None
-        # Note that PL requires this be less than an epoch
-        args = {**args, "val_check_interval": val_every_n_batches}
-    else:
-        assert val_every_n_epochs is not None
-        args = {**args, "check_val_every_n_epoch": val_every_n_epochs}
-
-    if logger is not None:
-        experiment_id = str(logger.experiment.id)
-    else:
-        experiment_id = str(uuid.uuid1())
-        
-    dirpath = Path(PROJECT_ROOT) / "checkpoints" / experiment_id
-    logging.info(f"Checkpoint will be saved in {dirpath}")
-    trainer = pl.Trainer(
-        enable_checkpointing=True,
-        callbacks=[
-            StochasticWeightAveraging(swa_lrs=1e-2),
-            ModelCheckpoint(
-                monitor="avg_val_collision_rate",
-                mode="min",  # Save model with LOWEST collision rate
-                save_last=False,
-                auto_insert_metric_name=True,
-                save_on_train_epoch_end=False,
-                dirpath=dirpath,
-                filename="best_collision-{epoch}-{step}-{avg_val_collision_rate:.4f}",
-            ),
-            ModelCheckpoint(
-                monitor="avg_val_target_error",
-                mode="min",  # Save model with LOWEST target error
-                save_last=False,
-                auto_insert_metric_name=True,
-                save_on_train_epoch_end=False,
-                dirpath=dirpath,
-                filename="best_target-{epoch}-{step}-{avg_val_target_error:.4f}",
-            ),
-        ],
-        max_epochs=max_epochs,
-        gradient_clip_val=1.0,
-        detect_anomaly=True,
-        accelerator="gpu",
-        devices=1,
-        logger=False if logger is None else logger,
-        **args,
-    )
-    return trainer
-
-def setup_logger(
-    should_log: bool, experiment_name: str, config_values: Dict[str, Any]
-) -> Optional[WandbLogger]:
+def setup_logger(should_log: bool, experiment_name: str, config_values: Dict[str, Any]):
     if not should_log:
-        pl.utilities.rank_zero_info("Disabling all logs")
+        print("Disabling all logs")
         return None
-    logger = WandbLogger(
-        name=experiment_name,
-        project="avoid-everything",
-        log_model=True,
-    )
-    logger.log_hyperparams(config_values)
+    logger = WandbLogger(name=experiment_name, project="avoid-everything", log_model=True)
+    try:
+        logger.log_hyperparams(config_values)
+    except Exception:
+        pass
     return logger
 
 def parse_args_and_configuration():
@@ -167,22 +114,13 @@ def run():
     Runs the training procedure
     """
     config = parse_args_and_configuration()
-    pl.utilities.rank_zero_info(f"Experiment name: {config['experiment_name']}")
+    print(f"Experiment name: {config['experiment_name']}")
     log_memory_usage("Start")
     
-    logger = setup_logger(
-        not config["no_logging"],
-        config["experiment_name"],
-        config,
-    )
-    trainer = setup_trainer(
-        val_every_n_batches=config.get("val_every_n_batches", None),
-        val_every_n_epochs=config.get("val_every_n_epochs", None),
-        max_epochs=100,
-        logger=logger,
-    )
-
-    log_memory_usage("After trainer setup")
+    logger = setup_logger(not config["no_logging"], config["experiment_name"], config)
+    fabric = setup_fabric()
+    fabric.launch()
+    log_memory_usage("After fabric setup")
 
     dm = DataModule(
         train_batch_size=10 if config["mintest"] else config["train_batch_size"],
@@ -200,24 +138,14 @@ def run():
     else:
         mdl_class = PretrainingMotionPolicyTransformer
     if "load_checkpoint_path" in config:
-        assert "resume_training" not in config
-        ckpt_path = config["load_checkpoint_path"]
-        pl.utilities.rank_zero_info(f"Loading from checkpoint: {ckpt_path}")
-        mdl = mdl_class.load_from_checkpoint(
-            ckpt_path,
-            **(config["shared_parameters"] or {}),
-            **(config["training_model_parameters"] or {}),
-        )
-    else:
-        mdl = mdl_class(
-            **(config["shared_parameters"] or {}),
-            **(config["training_model_parameters"] or {}),
-        )
+        # Loading Lightning checkpoints directly is no longer supported; user can adapt if needed.
+        print("Ignoring 'load_checkpoint_path' in Fabric mode for now.")
+    mdl = mdl_class(
+        **(config["shared_parameters"] or {}),
+        **(config["training_model_parameters"] or {}),
+    )
 
     log_memory_usage("After model creation")
-
-    if logger is not None:
-        logger.watch(mdl, log="gradients", log_freq=100)
         
     # Clear any cached memory before training
     gc.collect()
@@ -226,17 +154,172 @@ def run():
         
     log_memory_usage("Before training start")
     
-    if "resume_training" in config:
-        pl.utilities.rank_zero_info(
-            f"Continuing from checkpoint: {config['resume_training']['checkpoint_path']}"
-        )
-        trainer.fit(
-            model=mdl,
-            datamodule=dm,
-            ckpt_path=config["resume_training"]["checkpoint_path"],
-        )
-    else:
-        trainer.fit(model=mdl, datamodule=dm)
+    # Build optimizer/scheduler
+    opt_cfg = mdl.configure_optimizers()
+    optimizer = opt_cfg["optimizer"]
+    lr_sched_cfg = opt_cfg.get("lr_scheduler", None)
+    scheduler = lr_sched_cfg["scheduler"] if isinstance(lr_sched_cfg, dict) else lr_sched_cfg
+
+    # Setup Fabric wrapping
+    mdl, optimizer = fabric.setup(mdl, optimizer)
+
+    # Initialize robot/samplers on correct device
+    mdl.setup()
+
+    # Prepare datasets/dataloaders
+    dm.setup("fit")
+    # Setup dataloaders for distributed training
+    train_loader = fabric.setup_dataloaders(dm.train_dataloader())
+    val_loaders = dm.val_dataloader()
+    val_loaders = [fabric.setup_dataloaders(v) for v in val_loaders]
+
+    # Training configuration
+    max_epochs = int(config.get("max_epochs", 1))
+    max_train_batches = None
+    max_val_batches = None
+    # Limit epochs for smoke testing unless disabled
+    if os.environ.get("AE_SMOKE", "1") == "1" or bool(config.get("mintest", False)):
+        max_train_batches = 100
+        max_val_batches = 100
+        max_epochs = min(max_epochs, 1)
+    val_every_frac = config.get("val_every_n_fraction", None)
+    val_every_batches = config.get("val_every_n_batches", None)
+    val_every_epochs = config.get("val_every_n_epochs", None)
+    val_every_frac = None if val_every_frac is None else float(val_every_frac)
+    val_every_batches = None if val_every_batches is None else int(val_every_batches)
+    val_every_epochs = None if val_every_epochs is None else int(val_every_epochs)
+    ckpt_minutes = int(config.get("checkpoint_interval", 0))
+    log_every_n_steps = int(config.get("log_every_n_steps", 100))
+    base_save_dir = config.get("save_checkpoint_dir", str(Path(PROJECT_ROOT) / "checkpoints"))
+    run_id = None
+    if logger is not None:
+        try:
+            run_id = str(logger.version)
+        except Exception:
+            pass
+    save_dir = Path(base_save_dir) / (run_id if run_id is not None else "default")
+    os.makedirs(save_dir, exist_ok=True)
+
+    last_ckpt_time = time.time()
+
+    def validate_epoch(max_batches: Optional[int] = None):
+        mdl.eval()
+        n_batches = max_batches if max_batches is not None else len(val_loaders[0])
+        assert n_batches > 0, "No validation batches to run"
+        with torch.no_grad():
+            # Smoke test: run only the first validation loader using fast state-based metrics
+            if len(val_loaders) > 0:
+                vdl = val_loaders[0]
+                vbar = tqdm(vdl, total=min(len(vdl), n_batches), desc="Validation", leave=False)
+                bcount = 0
+                for batch in vbar:
+                    batch = {k: (v.to(fabric.device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                    mdl.state_validation_step(batch)
+                    bcount += 1
+                    if bcount >= n_batches:
+                        break
+        # Print and log metrics
+        metrics = {k: v for k, v in getattr(mdl, "logged_metrics", {}).items()}
+        # Add validation metric aggregates from torchmetrics
+        try:
+            metrics.update({
+                "val_point_match_loss": float(mdl.val_point_match_loss.compute().item()),
+                "val_collision_loss": float(mdl.val_collision_loss.compute().item()),
+                "val_loss": float(mdl.val_loss.compute().item()),
+            })
+        except Exception:
+            pass
+        # Always include current learning rate
+        try:
+            metrics["lr"] = float(optimizer.param_groups[0]["lr"])  
+        except Exception:
+            pass
+        if metrics:
+            print(metrics)
+            if logger is not None:
+                try:
+                    logger.log_metrics(metrics, step=global_step)
+                except Exception:
+                    pass
+        mdl.train()
+
+    mdl.train()
+    global_step = 0
+    for epoch in range(max_epochs):
+        show_bar = getattr(fabric, "global_rank", 0) == 0
+
+        if max_train_batches is not None:
+            n_batches = max_train_batches
+        else:
+            n_batches = len(train_loader)
+
+        epoch_bar = tqdm(total=n_batches, desc=f"Epoch {epoch+1}/{max_epochs}", unit="batch", leave=False, disable=not show_bar, dynamic_ncols=True)
+        # compute validation frequency
+        validate_every = None
+        if val_every_frac is not None:
+            validate_every = max(1, int(n_batches * float(val_every_frac)))
+        elif val_every_batches is not None:
+            validate_every = max(1, int(val_every_batches))
+        # else handled via end-of-epoch with val_every_epochs
+        batch_idx = 0
+        for batch in train_loader:
+            batch = {k: (v.to(fabric.device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+            collision_loss, point_match_loss = mdl.state_based_step(batch)
+            train_loss = mdl.combine_training_losses(collision_loss, point_match_loss)
+            optimizer.zero_grad(set_to_none=True)
+            fabric.backward(train_loss)
+            torch.nn.utils.clip_grad_norm_(mdl.parameters(), max_norm=1.0)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            global_step += 1
+            batch_idx += 1
+            if show_bar:
+                epoch_bar.set_postfix(loss=float(train_loss.detach().item()), batch=f"{batch_idx}/{n_batches}")
+                epoch_bar.update(1)
+            if logger is not None and (global_step % log_every_n_steps == 0):
+                try:
+                    current_lr = float(optimizer.param_groups[0]["lr"])  
+                except Exception:
+                    current_lr = None
+                try:
+                    train_metrics = {
+                        "train_loss": float(train_loss.detach().item()),
+                        "point_match_loss": float(mdl.logged_metrics.get("point_match_loss", float('nan'))),
+                        "collision_loss": float(mdl.logged_metrics.get("collision_loss", float('nan'))),
+                    }
+                    if current_lr is not None:
+                        train_metrics["lr"] = current_lr
+                    logger.log_metrics(train_metrics, step=global_step)
+                except Exception:
+                    pass
+
+            # periodic validation within epoch
+            if validate_every is not None and batch_idx % validate_every == 0:
+                if show_bar:
+                    print(f"\nValidation at batch {batch_idx}/{n_batches}")
+                validate_epoch(max_batches=max_val_batches)
+
+            # periodic checkpointing based on wall time
+            if ckpt_minutes > 0 and (time.time() - last_ckpt_time) / 60.0 >= ckpt_minutes:
+                ckpt_path = Path(save_dir) / f"fabric-epoch{epoch+1}-step{global_step}.ckpt"
+                fabric.save(str(ckpt_path), {"model": mdl.state_dict(), "optimizer": optimizer.state_dict()},) 
+                print(f"Saved checkpoint to {ckpt_path}")
+                last_ckpt_time = time.time()
+
+            if batch_idx >= n_batches:
+                break
+
+        # End of epoch validation
+        do_epoch_val = True
+        if val_every_epochs is not None:
+            do_epoch_val = ((epoch + 1) % val_every_epochs) == 0
+        if do_epoch_val:
+            if show_bar:
+                print(f"\nEnd of epoch {epoch+1} validation")
+            validate_epoch(max_batches=max_val_batches)
+
+    print("Finished Fabric run.")
 
     
 

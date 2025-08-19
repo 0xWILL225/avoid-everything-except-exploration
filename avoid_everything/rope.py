@@ -28,7 +28,6 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         warmup_steps: int,
         decay_rate: float,
         pc_bounds: list[list[float]],
-        action_chunk_length: int,
         hard_negative_ratio: float = 0.2,
     ):
         super().__init__(
@@ -45,7 +44,6 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
             warmup_steps,
             decay_rate,
             pc_bounds,
-            action_chunk_length,
         )
         self.hard_negative_ratio = hard_negative_ratio
         self.batch_cache: dict[str, torch.Tensor] = {}
@@ -204,7 +202,7 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         # Gets the mask and the supervision
         mask = batch["needs_correction"]
         # sv = unnormalize_franka_joints(batch["supervision"][mask].squeeze(1))
-        sv = self.robot.unnormalize_joints(batch["supervision"][mask].squeeze(1))
+        sv = self.robot.unnormalize_joints(batch["supervision"][mask])
         cuboids = TorchCuboids(
             batch["cuboid_centers"][mask],
             batch["cuboid_dims"][mask],
@@ -216,17 +214,17 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
             batch["cylinder_heights"][mask],
             batch["cylinder_quats"][mask],
         )
-        assert self.collision_sampler is not None
+        assert self.fk_sampler is not None
         for _ in range(200):
-            sv = torch.clamp(
-                sv, min=self.franka_limits[:, 0], max=self.franka_limits[:, 1]
-            )
+            # Clamp to robot joint limits if available on the robot instance
+            if hasattr(self.robot, "main_joint_limits"):
+                limits = torch.as_tensor(self.robot.main_joint_limits, device=sv.device)
+                sv = torch.clamp(sv, min=limits[:, 0], max=limits[:, 1])
             q_optim = Variable(sv, requires_grad=True)
             optimizer = optim.Adam([q_optim], lr=0.001)
-            spheres = self.collision_sampler.compute_spheres(
-                q_optim,
-                prismatic_joint=self.prismatic_joint,
-            )
+            assert self.fk_sampler is not None
+            # Use robot for collision spheres if available; fallback to fk sampler's robot
+            spheres = self.robot.compute_spheres(q_optim)
             centers = torch.cat([c for _, c in spheres], dim=1)
             radii = torch.cat(
                 [r * torch.ones(c.shape[:2], device=c.device) for r, c in spheres],
@@ -246,8 +244,7 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
                 break
             sv = q_optim.detach()
             if loss.item() <= 0.0:
-                # batch["supervision"][mask] = normalize_franka_joints(sv).unsqueeze(1)
-                batch["supervision"][mask] = self.robot.normalize_joints(sv).unsqueeze(1)
+                batch["supervision"][mask] = self.robot.normalize_joints(sv)
                 return batch
             optimizer.zero_grad()
             loss.backward()
@@ -305,8 +302,8 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         """
         clean_batch = copy.deepcopy(batch)
         xyz_labels, xyz, q, target_position, target_orientation = (
-            batch["xyz_labels"],
-            batch["xyz"],
+            batch["point_cloud_labels"],
+            batch["point_cloud"],
             batch["configuration"],
             batch["target_position"],
             batch["target_orientation"],
@@ -326,13 +323,13 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         B = q.size(0)
         needs_correction = torch.zeros((B,), dtype=bool, device=q.device)
         # sv_unnorm = unnormalize_franka_joints(batch["supervision"].squeeze(1))
-        sv_unnorm = self.robot.unnormalize_joints(batch["supervision"].squeeze(1))
+        sv_unnorm = self.robot.unnormalize_joints(batch["supervision"])
         # First check if any of the batch elements are already one step
         # away from the goal
         reached_target = self.check_reaching_success(
             sv_unnorm, target_position, target_orientation
         )
-        assert self.collision_sampler is not None
+        assert self.fk_sampler is not None
 
         success = False
         supervision = torch.zeros_like(q)
@@ -345,16 +342,19 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         mask = ~torch.logical_or(needs_correction, reached_target)
         for i in range(rollout_length):
             # Call policy to get delta
-            qdelta = self(
+            qdelta_pred = self(
                 xyz_labels[mask],
                 xyz[mask],
                 q[mask],
                 self.pc_bounds,
-            ).squeeze(1)
+            )
+            if qdelta_pred.dim() == 3:
+                qdelta = qdelta_pred[:, -1, :]
+            else:
+                qdelta = qdelta_pred
             # Add to current config to get next config
 
             supervision[mask] = torch.clamp(q[mask] + qdelta, min=-1, max=1)
-            # sv_unnorm = unnormalize_franka_joints(supervision[mask])
             sv_unnorm = self.robot.unnormalize_joints(supervision[mask])
             # Calculate which supervision has reached the target
             reached_target[mask] = self.check_reaching_success(
@@ -376,7 +376,6 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
             if torch.all(~mask):
                 break
             q[mask] = supervision[mask]
-            # q_unnorm = unnormalize_franka_joints(q[mask])
             q_unnorm = self.robot.unnormalize_joints(q[mask])
             samples = sampler(q_unnorm)[..., :3]
             xyz[mask, : samples.size(1)] = samples
@@ -390,10 +389,10 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         clean_batch["supervision"] = torch.where(
             needs_correction[:, None],
             supervision,
-            clean_batch["supervision"].squeeze(1),
-        ).unsqueeze(1)
-        clean_batch["xyz"] = torch.where(
-            needs_correction[:, None, None], xyz, clean_batch["xyz"]
+            clean_batch["supervision"],
+        )
+        clean_batch["point_cloud"] = torch.where(
+            needs_correction[:, None, None], xyz, clean_batch["point_cloud"]
         )
         clean_batch["needs_correction"] = needs_correction
         return clean_batch, success
@@ -427,10 +426,7 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         """
         Checks if a batch of joint configurations has collided with their environments.
         """
-        assert self.collision_sampler is not None
-        collision_spheres = self.collision_sampler.compute_spheres(
-            q_unnorm, prismatic_joint=self.prismatic_joint
-        )
+        collision_spheres = self.robot.compute_spheres(q_unnorm)
         has_collision = torch.zeros(
             (q_unnorm.shape[0],), dtype=torch.bool, device=self.device
         )
@@ -484,7 +480,14 @@ class ROPEMotionPolicyTransformer(PretrainingMotionPolicyTransformer):
         """
         Slightly different from parent because val rollouts aren't computed
         """
-        self.log("corrected_step", self.corrected_step)
-        self.log("avg_val_target_error", self.val_position_error)
-        self.log("avg_val_orientation_error", self.val_orientation_error)
-        self.log("avg_val_collision_rate", self.val_collision_rate)
+        # Store metrics in logged_metrics for optional external logging
+        if not hasattr(self, "logged_metrics"):
+            self.logged_metrics = {}
+        self.logged_metrics["corrected_step"] = float(self.corrected_step)
+        # torchmetrics Metric: store current value if available
+        try:
+            self.logged_metrics["avg_val_target_error"] = float(self.val_position_error.compute().item())
+            self.logged_metrics["avg_val_orientation_error"] = float(self.val_orientation_error.compute().item())
+            self.logged_metrics["avg_val_collision_rate"] = float(self.val_collision_rate.compute().item())
+        except Exception:
+            pass

@@ -21,30 +21,42 @@
 # DEALINGS IN THE SOFTWARE.
 
 training_model_parameters:
-  collision_loss_weight: 5
-  point_match_loss_weight: 1
-  collision_loss_margin: 0.03
+  robot_dof: 7
+  point_match_loss_weight: 1 # point match loss (BC loss) weight for agent 
+  one_step_Q_weight: 1 # one-step Q-learning loss weight for critic
+  agent_loss_weight: 1 # agent loss weight for actor
+  collision_loss_margin: 0.03 # how close to obstacle to be considered collision [m]
+  goal_reward: 100.0 # reward for reaching the goal
+  collision_reward: -10.0 # reward for colliding with an obstacle
+  step_reward: -1.0 # reward for each step
   min_lr: 1.0e-5
-  max_lr: 7.0e-5 # May not work
+  max_lr: 5.0e-5
   warmup_steps: 5000
+  pretraining_steps: 10000 # how many steps to pretrain for before sampling from agent's replay buffer
+  replay_buffer_fraction: 0.75 # what fraction of samples to sample from agent's replay buffer after pre-training
   decay_rate: null # 0.999
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
-  hard_negative_ratio: 0.2
   train_batch_size: 10
+  disable_viz: true
+
 data_module_parameters:
-  data_dir: /workspace/datasets/mpinets_global_training_data
-  train_trajectory_key: "robot_configurations" # Training dataset uses this key
-  val_trajectory_key: "global_solutions" # Validation dataset uses this key
+  data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
+  train_trajectory_key: "global_solutions"
+  val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
-  num_target_points: 128
   random_scale: 0.015
+  num_target_points: 128
+
 shared_parameters:
-  prismatic_joint: 0.04
   num_robot_points: 2048
-num_workers: 10
-checkpoint_interval: 60
-val_every_n_fraction: 0.2
-gpus: 1 # If > 1, will use DDP for training.
+  urdf_path: /workspace/assets/panda/panda_spheres.urdf
+  # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+
+num_workers: 6
+checkpoint_interval: 30
+n_agent_rollouts: 1000 # how many agent rollouts to run
+agent_rollouts_every_n_batches: 1000 # how often to run agent rollouts
+gpus: 1
 train_batch_size: 10
 val_batch_size: 10
 max_epochs: 100
@@ -53,7 +65,5 @@ stop_early: false
 mintest: false
 no_logging: false
 save_checkpoint_dir: /workspace/checkpoints
-load_checkpoint_path: PATH/TO/PRETRAINING/CHECKPOINT
-experiment_name: ROPEFineTuning
-description: "Put in a description for the ROPE experiment"
-
+experiment_name: "Cretin: Avoid Everything with Fabric"
+description: "Testing training with pytorch lightning fabric"

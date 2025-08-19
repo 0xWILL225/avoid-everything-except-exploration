@@ -22,8 +22,6 @@
 
 from pathlib import Path
 from typing import Dict, Optional, Union
-
-import lightning.pytorch as pl
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -345,7 +343,6 @@ class StateDataset(Base):
         num_obstacle_points: int,
         num_target_points: int,
         random_scale: float,
-        action_chunk_length: int,
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -368,7 +365,6 @@ class StateDataset(Base):
             num_target_points,
             random_scale,
         )
-        self.action_chunk_length = action_chunk_length
 
     @classmethod
     def load_from_directory(
@@ -381,7 +377,6 @@ class StateDataset(Base):
         num_target_points: int,
         dataset_type: DatasetType,
         random_scale: float,
-        action_chunk_length: int,
     ):
         return super().load_from_directory(
             robot,
@@ -392,7 +387,6 @@ class StateDataset(Base):
             num_obstacle_points,
             num_target_points,
             random_scale,
-            action_chunk_length=action_chunk_length,
         )
 
     def __len__(self):
@@ -416,11 +410,10 @@ class StateDataset(Base):
             problem = f[self.trajectory_key].problem(pidx)
             flobs = f[self.trajectory_key].flattened_obstacles(pidx)
             item = self.get_inputs(problem, flobs)
-            configs = f[self.trajectory_key].state_range(
-                idx, lookahead=self.action_chunk_length + 1
-            )
+            # Retrieve current and next configuration (single-step supervision)
+            configs = f[self.trajectory_key].state_range(idx, lookahead=2)
             config = configs[0]
-            supervision = configs[1:]
+            supervision = configs[1]
             config_tensor = torch.as_tensor(config).float()
 
             if self.train:
@@ -454,7 +447,7 @@ class StateDataset(Base):
         return item
 
 
-class DataModule(pl.LightningDataModule):
+class DataModule:
     def __init__(
         self,
         urdf_path: str,
@@ -464,7 +457,6 @@ class DataModule(pl.LightningDataModule):
         num_robot_points: int,
         num_obstacle_points: int,
         num_target_points: int,
-        action_chunk_length: int,
         random_scale: float,
         train_batch_size: int,
         val_batch_size: int,
@@ -482,7 +474,6 @@ class DataModule(pl.LightningDataModule):
         self.num_target_points = num_target_points
         self.num_workers = num_workers
         self.random_scale = random_scale
-        self.action_chunk_length = action_chunk_length
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -502,7 +493,6 @@ class DataModule(pl.LightningDataModule):
                 num_obstacle_points=self.num_obstacle_points,
                 num_target_points=self.num_target_points,
                 random_scale=self.random_scale,
-                action_chunk_length=self.action_chunk_length,
             )
             self.data_val_state = StateDataset.load_from_directory(
                 self.robot,
@@ -513,7 +503,6 @@ class DataModule(pl.LightningDataModule):
                 num_obstacle_points=self.num_obstacle_points,
                 num_target_points=self.num_target_points,
                 random_scale=0.0,
-                action_chunk_length=self.action_chunk_length,
             )
             self.data_val = TrajectoryDataset.load_from_directory(
                 self.robot,
@@ -573,7 +562,6 @@ class DataModule(pl.LightningDataModule):
                 self.num_target_points,
                 dataset_type=DatasetType.TEST,
                 random_scale=self.random_scale,
-                action_chunk_length=self.action_chunk_length,
             )
         if stage == "dagger":
             self.data_dagger = TrajectoryDataset.load_from_directory(

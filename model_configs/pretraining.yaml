@@ -21,7 +21,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 training_model_parameters:
-  robot_dof: 6
+  robot_dof: 7
   collision_loss_weight: 5
   point_match_loss_weight: 1
   collision_loss_margin: 0.03
@@ -35,8 +35,8 @@ training_model_parameters:
 
 data_module_parameters:
   # data_dir: /workspace/datasets/mpinets_global_training_data/global_dataset_6540000
-  # data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
-  data_dir: /workspace/datasets/gp7_cubby_data
+  data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
+  # data_dir: /workspace/datasets/gp7_cubby_data
   # train_trajectory_key: "robot_configurations" # for mpinets data
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
@@ -46,13 +46,12 @@ data_module_parameters:
 
 shared_parameters:
   num_robot_points: 2048
-  action_chunk_length: 1
-  # urdf_path: /workspace/assets/panda/panda_spheres.urdf
-  urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+  urdf_path: /workspace/assets/panda/panda_spheres.urdf
+  # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
 
 num_workers: 6
-checkpoint_interval: 60
-val_every_n_epochs: 1
+checkpoint_interval: 30
+val_every_n_fraction: 0.2
 gpus: 1
 train_batch_size: 10
 val_batch_size: 10
@@ -62,5 +61,5 @@ stop_early: false
 mintest: false
 no_logging: false
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Cretin: Avoid Everything GP7 test"
-description: "Testing training with GP7 robot and dataset"
+experiment_name: "Cretin: Avoid Everything with Fabric"
+description: "Testing training with pytorch lightning fabric"

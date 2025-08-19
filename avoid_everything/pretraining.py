@@ -38,7 +38,6 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         warmup_steps: int,
         decay_rate: float,
         pc_bounds: list[list[float]],
-        action_chunk_length: int,
     ):
         """
         Creates the network and assigns additional parameters for training
@@ -78,7 +77,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         self.pc_bounds = torch.as_tensor(pc_bounds)
         self.train_batch_size = train_batch_size
         self.corrected_step = 0
-        self.action_chunk_length = action_chunk_length
+        self.logged_metrics: dict[str, float] = {}
 
     def configure_optimizers(self):
         """
@@ -107,16 +106,14 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
 
     def get_device(self):
         """
-        Get the device for this model. Comes from the trainer if available, otherwise
-        uses the device attribute.
+        Resolve current device from model parameters.
         """
-        if self._trainer is not None:
-            return self.trainer.strategy.root_device
-        return self.device
+        return next(self.parameters()).device
 
     def setup(self, stage=None):
         """
-        Sets up the model by getting the device and initializing the collision and FK samplers.
+        Initialize robot/FK sampler on current device. Kept for backward-compat.
+        Call after moving model to the desired device.
         """
         device = self.get_device()
         self.robot = Robot(self.urdf_path, device=device)
@@ -135,7 +132,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         batch: dict[str, torch.Tensor],
         rollout_length: int,
         sampler: Callable[[torch.Tensor], torch.Tensor],
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Rolls out the policy an arbitrary length by calling it iteratively
 
@@ -162,26 +159,30 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         )
 
         B = q.size(0)
-        n_chunks = rollout_length // self.action_chunk_length + 1
-        actual_rollout_length = n_chunks * self.action_chunk_length + 1
+        # Trajectory includes the starting configuration plus `rollout_length` steps
+        actual_rollout_length = rollout_length + 1
         assert self.robot is not None
-        trajectory = torch.zeros((B, actual_rollout_length, self.robot.MAIN_DOF), device=self.device)
+        device = q.device
+        trajectory = torch.zeros((B, actual_rollout_length, self.robot.MAIN_DOF), device=device)
         q_unnorm = self.robot.unnormalize_joints(q)
         assert isinstance(q_unnorm, torch.Tensor)
         trajectory[:, 0, :] = q_unnorm
 
-        for i in range(1, actual_rollout_length, self.action_chunk_length):
+        for i in range(1, actual_rollout_length):
             # Have to copy the scene and target pc's because they are being re-used and
             # sparse tensors are stateful
             qdeltas = self(point_cloud_labels, point_cloud, q, self.pc_bounds)
-            y_hats = torch.clamp(
-                q.unsqueeze(1) + torch.cumsum(qdeltas, dim=1), min=-1, max=1
-            )
-            q_unnorm = self.robot.unnormalize_joints(y_hats)
-            trajectory[:, i : i + self.action_chunk_length, :] = q_unnorm
-            samples = sampler(q_unnorm[:, -1, :])[..., :3]
+            # Support models returning either [B, DOF] or [B, 1, DOF]
+            if qdeltas.dim() == 3:
+                qdelta = qdeltas[:, -1, :]
+            else:
+                qdelta = qdeltas
+            y_hat = torch.clamp(q + qdelta, min=-1, max=1)
+            q_unnorm = self.robot.unnormalize_joints(y_hat)
+            trajectory[:, i, :] = q_unnorm
+            samples = sampler(q_unnorm)[..., :3]
             point_cloud[:, : samples.size(1)] = samples
-            q = y_hats[:, -1, :]
+            q = y_hat
 
         return trajectory
 
@@ -194,9 +195,12 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
             batch["configuration"],
         )
         qdeltas = self(point_cloud_labels, point_cloud, q, self.pc_bounds)
-        y_hats = torch.clamp(
-            q.unsqueeze(1) + torch.cumsum(qdeltas, dim=1), min=-1, max=1
-        )
+        # Support models returning either [B, DOF] or [B, 1, DOF]
+        if qdeltas.dim() == 3:
+            qdelta = qdeltas[:, -1, :]
+        else:
+            qdelta = qdeltas
+        y_hats = torch.clamp(q + qdelta, min=-1, max=1)
         (
             cuboid_centers,
             cuboid_dims,
@@ -218,28 +222,35 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         )
         assert self.robot is not None
         collision_loss, point_match_loss = self.loss_fun(
-            y_hats.reshape(-1, self.robot.MAIN_DOF),
-            cuboid_centers.repeat_interleave(self.action_chunk_length, dim=0),
-            cuboid_dims.repeat_interleave(self.action_chunk_length, dim=0),
-            cuboid_quats.repeat_interleave(self.action_chunk_length, dim=0),
-            cylinder_centers.repeat_interleave(self.action_chunk_length, dim=0),
-            cylinder_radii.repeat_interleave(self.action_chunk_length, dim=0),
-            cylinder_heights.repeat_interleave(self.action_chunk_length, dim=0),
-            cylinder_quats.repeat_interleave(self.action_chunk_length, dim=0),
-            supervision.reshape(-1, self.robot.MAIN_DOF),
+            y_hats,
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quats,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quats,
+            supervision,
         )
         return collision_loss, point_match_loss
 
     def combine_training_losses(
         self, collision_loss: torch.Tensor, point_match_loss: torch.Tensor
     ) -> torch.Tensor:
-        self.log("point_match_loss", point_match_loss)
-        self.log("collision_loss", collision_loss)
+        # Store metrics for optional external logging
+        try:
+            self.logged_metrics["point_match_loss"] = float(point_match_loss.detach().item())
+            self.logged_metrics["collision_loss"] = float(collision_loss.detach().item())
+        except Exception:
+            pass
         train_loss = (
             self.point_match_loss_weight * point_match_loss
             + self.collision_loss_weight * collision_loss
         )
-        self.log("train_loss", train_loss)
+        try:
+            self.logged_metrics["train_loss"] = float(train_loss.detach().item())
+        except Exception:
+            pass
         return train_loss
 
     def training_step(  # type: ignore[override]
@@ -282,7 +293,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         """
         assert self.fk_sampler is not None
         eff = self.fk_sampler.end_effector_pose(rollouts[:, -1])
-        position_error = torch.linalg.vector_norm(
+        position_error = torch.norm(
             eff[:, :3, -1] - batch["target_position"], dim=1
         )
 
@@ -314,7 +325,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         assert rollouts.size(2) == self.robot.MAIN_DOF
 
         rollout_steps = rollouts.reshape(-1, self.robot.MAIN_DOF)
-        has_collision = torch.zeros(B, dtype=torch.bool, device=self.device)
+        has_collision = torch.zeros(B, dtype=torch.bool, device=rollouts.device)
         
         collision_spheres = self.robot.compute_spheres(rollout_steps)
         for radii, spheres in collision_spheres: # spheres: torch.Tensor [B, num_spheres, 3], 3-dim is x,y,z
@@ -361,7 +372,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         eff_poses = self.fk_sampler.end_effector_pose(
             rollouts.reshape(-1, self.robot.MAIN_DOF)
         ).reshape(B, -1, 4, 4)
-        pos_errors = torch.linalg.vector_norm(
+        pos_errors = torch.norm(
             eff_poses[:, :, :3, -1] - batch["target_position"][:, None, :], dim=2
         )
         R = torch.matmul(
@@ -373,7 +384,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         orien_errors = torch.abs(torch.rad2deg(torch.acos(cos_value)))
 
         # Use the whole trajectory if there are no successes
-        whole_trajectory_mask = torch.zeros_like(pos_errors, dtype=bool)
+        whole_trajectory_mask = torch.zeros_like(pos_errors, dtype=torch.bool)
         whole_trajectory_mask[:, -1] = True
 
         # Mask elements that meet criterion for success
