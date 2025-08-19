@@ -22,7 +22,6 @@
 
 from pathlib import Path
 from typing import Dict, Optional, Union
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -60,6 +59,9 @@ class Base(Dataset):
         num_obstacle_points: int,
         num_target_points: int,
         random_scale: float,
+        goal_reward: Optional[float] = None,
+        collision_reward: Optional[float] = None,
+        step_reward: Optional[float] = None,
     ):
         """
         :param robot (Robot): Robot object
@@ -97,6 +99,9 @@ class Base(Dataset):
             use_cache=True,
             with_base_link=True,
         )
+        self.goal_reward = goal_reward if goal_reward is not None else 0.0
+        self.collision_reward = collision_reward if collision_reward is not None else 0.0
+        self.step_reward = step_reward if step_reward is not None else 0.0
 
     @property
     def file_exists(self) -> bool:
@@ -118,6 +123,9 @@ class Base(Dataset):
     ):
         directory = Path(directory)
         if dataset_type in (DatasetType.TRAIN, "train"):
+            enclosing_path = directory / "train"
+            data_path = enclosing_path / "train.hdf5"
+        if dataset_type in (DatasetType.COL, "train"):
             enclosing_path = directory / "train"
             data_path = enclosing_path / "train.hdf5"
         elif dataset_type in (DatasetType.VAL_STATE, "val"):
@@ -446,6 +454,157 @@ class StateDataset(Base):
 
         return item
 
+class StateRewardDataset(Base):
+    """
+    This is the dataset used for training with Cycle of Learning (CoL). Each 
+    element in the dataset represents the robot and scene at a particular time 
+    $t$, robot's configuration at $t+1$ and the reward for the transition.
+    """
+
+    def __init__(
+        self,
+        robot: Robot,
+        data_path: Union[Path, str],
+        dataset_type: DatasetType,
+        trajectory_key: str,
+        num_robot_points: int,
+        num_obstacle_points: int,
+        num_target_points: int,
+        random_scale: float,
+        goal_reward: float,
+        collision_reward: float,
+        step_reward: float,
+    ):
+        """
+        :param directory Path: The path to the root of the data directory
+        :param num_robot_points int: The number of points to sample from the robot
+        :param num_obstacle_points int: The number of points to sample from the obstacles
+        :param num_target_points int: The number of points to sample from the target
+                                      robot end effector
+        :param dataset_type DatasetType: What type of dataset this is
+        :param random_scale float: The standard deviation of the random normal
+                                   noise to apply to the joints during training.
+                                   This is only used for train datasets.
+        """
+        super().__init__(
+            robot,
+            data_path,
+            dataset_type,
+            trajectory_key,
+            num_robot_points,
+            num_obstacle_points,
+            num_target_points,
+            random_scale,
+            goal_reward,
+            collision_reward,
+            step_reward,
+        )
+
+    @classmethod
+    def load_from_directory(
+        cls,
+        robot: Robot,
+        directory: Path,
+        trajectory_key: str,
+        num_robot_points: int,
+        num_obstacle_points: int,
+        num_target_points: int,
+        dataset_type: DatasetType,
+        random_scale: float,
+        goal_reward: float,
+        collision_reward: float,
+        step_reward: float,
+    ):
+        return super().load_from_directory(
+            robot,
+            directory,
+            dataset_type,
+            trajectory_key,
+            num_robot_points,
+            num_obstacle_points,
+            num_target_points,
+            random_scale,
+            goal_reward,
+            collision_reward,
+            step_reward,
+        )
+        
+    def __len__(self):
+        """
+        Returns the total number of start configurations in the dataset (i.e.
+        the length of the trajectories times the number of trajectories)
+
+        """
+        return self.state_count
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Returns a training datapoint representing a single configuration in a
+        single scene with the configuration at the next timestep and the reward 
+        for the transition.
+
+        :param idx int: Index represents the timestep within the trajectory
+        :rtype Dict[str, torch.Tensor]: The data used for training
+        """
+        with MPNDataset(self.robot, self._database, "r") as f:
+            pidx = f[self.trajectory_key].lookup_pidx(idx)
+            problem = f[self.trajectory_key].problem(pidx)
+            flobs = f[self.trajectory_key].flattened_obstacles(pidx)
+            item = self.get_inputs(problem, flobs)
+            
+            configs = f[self.trajectory_key].state_range(idx, lookahead=2)
+            config = configs[0]
+            next_config = configs[1]
+            config_tensor = torch.as_tensor(config).float()
+
+            if self.train:
+                # Add slight random noise to the joints
+                randomized = (
+                    self.random_scale * torch.randn(config_tensor.shape) + config_tensor
+                )
+
+                item["configuration"] = self.clamp_and_normalize(randomized)
+                robot_points = self.robot_sampler.sample(
+                    randomized.numpy()
+                )[:, :3]
+            else:
+                item["configuration"] = self.clamp_and_normalize(config_tensor)
+                robot_points = self.robot_sampler.sample(
+                    config_tensor.numpy()
+                )[:, :3]
+            robot_points = torch.as_tensor(robot_points).float()
+            item["point_cloud"] = torch.cat((robot_points, item["point_cloud"]), dim=0)
+            item["point_cloud_labels"] = torch.cat(
+                (
+                    torch.zeros(len(robot_points), 1),
+                    item["point_cloud_labels"],
+                )
+            )
+
+            item["idx"] = torch.as_tensor(idx)
+            next_config_tensor = torch.as_tensor(next_config).float()
+            item["next_configuration"] = self.clamp_and_normalize(next_config_tensor)
+            
+            # Reward is goal if the next state equals the last expert state;
+            # otherwise it's the step reward. We compare normalized states to
+            # match item["next_configuration"].
+            keyed = f[self.trajectory_key]
+            expert_len = int(keyed.expert_length(pidx))
+            # Get the last state in the expert trajectory for this problem index
+            last_state_np = keyed.file[keyed.key][pidx, expert_len - 1]
+            last_state_norm = self.clamp_and_normalize(torch.as_tensor(last_state_np).float())
+            is_goal_transition = torch.allclose(
+                item["next_configuration"], last_state_norm, rtol=1e-6, atol=1e-6
+            )
+            item["reward"] = (
+                torch.as_tensor(self.goal_reward).float()
+                if is_goal_transition
+                else torch.as_tensor(self.step_reward).float()
+            )
+
+        return item
+
+
 
 class DataModule:
     def __init__(
@@ -461,6 +620,10 @@ class DataModule:
         train_batch_size: int,
         val_batch_size: int,
         num_workers: int,
+        include_reward: Optional[bool] = None,
+        goal_reward: Optional[float] = None,
+        collision_reward: Optional[float] = None,
+        step_reward: Optional[float] = None,
     ):
         super().__init__()
         self.robot = Robot(urdf_path)
@@ -474,6 +637,10 @@ class DataModule:
         self.num_target_points = num_target_points
         self.num_workers = num_workers
         self.random_scale = random_scale
+        self.include_reward = include_reward if include_reward is not None else False
+        self.goal_reward = goal_reward if goal_reward is not None else 0.0
+        self.collision_reward = collision_reward if collision_reward is not None else 0.0
+        self.step_reward = step_reward if step_reward is not None else 0.0
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -484,16 +651,31 @@ class DataModule:
                                     procedure or if we are doing ad-hoc testing
         """
         if stage == "fit" or stage is None:
-            self.data_train = StateDataset.load_from_directory(
-                self.robot,
-                self.data_dir,
-                dataset_type=DatasetType.TRAIN,
-                trajectory_key=self.train_trajectory_key,
-                num_robot_points=self.num_robot_points,
-                num_obstacle_points=self.num_obstacle_points,
-                num_target_points=self.num_target_points,
-                random_scale=self.random_scale,
-            )
+            if self.include_reward:
+                self.data_train = StateRewardDataset.load_from_directory(
+                    self.robot,
+                    self.data_dir,
+                    dataset_type=DatasetType.COL,
+                    trajectory_key=self.train_trajectory_key,
+                    num_robot_points=self.num_robot_points,
+                    num_obstacle_points=self.num_obstacle_points,
+                    num_target_points=self.num_target_points,
+                    random_scale=self.random_scale,
+                    goal_reward=self.goal_reward,
+                    collision_reward=self.collision_reward,
+                    step_reward=self.step_reward,
+                )
+            else:
+                self.data_train = StateDataset.load_from_directory(
+                    self.robot,
+                    self.data_dir,
+                    dataset_type=DatasetType.TRAIN,
+                    trajectory_key=self.train_trajectory_key,
+                    num_robot_points=self.num_robot_points,
+                    num_obstacle_points=self.num_obstacle_points,
+                    num_target_points=self.num_target_points,
+                    random_scale=self.random_scale,
+                )
             self.data_val_state = StateDataset.load_from_directory(
                 self.robot,
                 self.data_dir,

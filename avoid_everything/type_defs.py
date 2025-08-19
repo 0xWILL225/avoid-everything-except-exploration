@@ -43,6 +43,7 @@ class DatasetType(IntEnum):
     VAL_PRETRAIN = 3
     TEST = 4
     TRAIN = 5
+    COL = 6 # Cycle of Learning (RL transitions)
 
 
 @dataclass(kw_only=True)

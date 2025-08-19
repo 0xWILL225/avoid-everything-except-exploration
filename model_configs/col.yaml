@@ -22,13 +22,11 @@
 
 training_model_parameters:
   robot_dof: 7
+  collision_loss_weight: 5 # collision loss weight
+  collision_loss_margin: 0.03 # how close to obstacle to be considered collision [m]
   point_match_loss_weight: 1 # point match loss (BC loss) weight for agent 
   one_step_Q_weight: 1 # one-step Q-learning loss weight for critic
   agent_loss_weight: 1 # agent loss weight for actor
-  collision_loss_margin: 0.03 # how close to obstacle to be considered collision [m]
-  goal_reward: 100.0 # reward for reaching the goal
-  collision_reward: -10.0 # reward for colliding with an obstacle
-  step_reward: -1.0 # reward for each step
   min_lr: 1.0e-5
   max_lr: 5.0e-5
   warmup_steps: 5000
@@ -46,24 +44,28 @@ data_module_parameters:
   num_obstacle_points: 4096
   random_scale: 0.015
   num_target_points: 128
+  include_reward: true
 
 shared_parameters:
   num_robot_points: 2048
   urdf_path: /workspace/assets/panda/panda_spheres.urdf
   # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+  goal_reward: 100.0 # reward for reaching the goal
+  collision_reward: -10.0 # reward for colliding with an obstacle
+  step_reward: -1.0 # reward for each step
 
 num_workers: 6
 checkpoint_interval: 30
 n_agent_rollouts: 1000 # how many agent rollouts to run
 agent_rollouts_every_n_batches: 1000 # how often to run agent rollouts
 gpus: 1
-train_batch_size: 10
-val_batch_size: 10
+train_batch_size: 12
+val_batch_size: 12
 max_epochs: 100
 use_simple_model: false
 stop_early: false
 mintest: false
 no_logging: false
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Cretin: Avoid Everything with Fabric"
-description: "Testing training with pytorch lightning fabric"
+experiment_name: "Cretin: Avoid Everything Except Exploration"
+description: "Testing CoL training"
