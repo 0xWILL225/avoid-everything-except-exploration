@@ -38,6 +38,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         warmup_steps: int,
         decay_rate: float,
         pc_bounds: list[list[float]],
+        rollout_length: int,
     ):
         """
         Creates the network and assigns additional parameters for training
@@ -78,7 +79,8 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         self.train_batch_size = train_batch_size
         self.corrected_step = 0
         self.logged_metrics: dict[str, float] = {}
-
+        self.rollout_length = rollout_length
+        
     def configure_optimizers(self):
         """
         Configures the optimizer and scheduler.
@@ -125,6 +127,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
             with_base_link=True,
             device=device,
         )
+        assert self.robot.MAIN_DOF == self.robot_dof
         self.pc_bounds = self.pc_bounds.to(device)
 
     def rollout(
@@ -423,7 +426,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         """
         Performs a validation step by calculating metrics on rollouts.
         """
-        rollouts = self.rollout(batch, 69, self.sample)
+        rollouts = self.rollout(batch, self.rollout_length, self.sample) # 69 steps
         rollouts, _, has_reaching_success = self.end_rollouts_at_target(batch, rollouts)
         position_error, orientation_error = self.target_error(batch, rollouts)
         has_collision = self.collision_error(batch, rollouts)

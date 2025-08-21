@@ -22,6 +22,9 @@
 
 from pathlib import Path
 from typing import Dict, Optional, Union
+from functools import lru_cache
+
+from termcolor import cprint
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -103,6 +106,39 @@ class Base(Dataset):
         self.collision_reward = collision_reward if collision_reward is not None else 0.0
         self.step_reward = step_reward if step_reward is not None else 0.0
 
+    @lru_cache(maxsize=4096)
+    def scene_by_idx(self, idx: int) -> dict[str, torch.Tensor]:
+        """Returns dictionary with static scene info for a given idx (CPU tensors)."""
+        item = {}
+        with MPNDataset(self.robot, self._database, "r") as f:
+            pidx = f[self.trajectory_key].lookup_pidx(int(idx))
+            problem = f[self.trajectory_key].problem(pidx)
+            flobs = f[self.trajectory_key].flattened_obstacles(pidx)
+
+            # target pose (CPU)
+            target_pose = self.robot.fk(problem.target)[self.robot.tcp_link_name].squeeze()
+            target_points = torch.as_tensor(
+                self.robot_sampler.sample_end_effector(target_pose)[..., :3]
+            ).float()  # [N_target, 3]
+
+            # scene obstacle points (CPU)
+            scene_points = torch.as_tensor(
+                construct_mixed_point_cloud(problem.obstacles, self.num_obstacle_points)[..., :3]
+            ).float()  # [N_scene, 3]
+
+            item["cuboid_centers"] = torch.as_tensor(flobs.cuboid_centers).float()
+            item["cuboid_dims"] =    torch.as_tensor(flobs.cuboid_dims).float()
+            item["cuboid_quats"] =   torch.as_tensor(flobs.cuboid_quaternions).float()
+            item["cylinder_centers"] = torch.as_tensor(flobs.cylinder_centers).float()
+            item["cylinder_radii"] =   torch.as_tensor(flobs.cylinder_radii).float()
+            item["cylinder_heights"] = torch.as_tensor(flobs.cylinder_heights).float()
+            item["cylinder_quats"] =   torch.as_tensor(flobs.cylinder_quaternions).float()
+            item["target_position"] =  torch.as_tensor(target_pose[:3, 3]).float()
+            item["target_orientation"] = torch.as_tensor(target_pose[:3, :3]).float()
+            item["scene_points"] = scene_points
+            item["target_points"] = target_points
+        return item
+
     @property
     def file_exists(self) -> bool:
         return self._database.exists()
@@ -125,7 +161,7 @@ class Base(Dataset):
         if dataset_type in (DatasetType.TRAIN, "train"):
             enclosing_path = directory / "train"
             data_path = enclosing_path / "train.hdf5"
-        if dataset_type in (DatasetType.COL, "train"):
+        elif dataset_type in (DatasetType.COL, "train"):
             enclosing_path = directory / "train"
             data_path = enclosing_path / "train.hdf5"
         elif dataset_type in (DatasetType.VAL_STATE, "val"):
@@ -162,7 +198,7 @@ class Base(Dataset):
         """
         # NOTE: self.robot.main_joint_limits based on URDF is different from the
         # original implementation's RealFrankaConstanst.JOINT_LIMITS for joint 6
-        limits = torch.as_tensor(self.robot.main_joint_limits).float() 
+        limits = torch.as_tensor(self.robot.main_joint_limits).float()
         configuration_tensor = torch.minimum(
             torch.maximum(configuration_tensor, limits[:, 0]), limits[:, 1]
         )
@@ -458,7 +494,8 @@ class StateRewardDataset(Base):
     """
     This is the dataset used for training with Cycle of Learning (CoL). Each 
     element in the dataset represents the robot and scene at a particular time 
-    $t$, robot's configuration at $t+1$ and the reward for the transition.
+    $t$, robot's configuration at $t+1$, the action for the transition and the 
+    reward for the transition.
     """
 
     def __init__(
@@ -551,7 +588,7 @@ class StateRewardDataset(Base):
             problem = f[self.trajectory_key].problem(pidx)
             flobs = f[self.trajectory_key].flattened_obstacles(pidx)
             item = self.get_inputs(problem, flobs)
-            
+
             configs = f[self.trajectory_key].state_range(idx, lookahead=2)
             config = configs[0]
             next_config = configs[1]
@@ -584,6 +621,7 @@ class StateRewardDataset(Base):
             item["idx"] = torch.as_tensor(idx)
             next_config_tensor = torch.as_tensor(next_config).float()
             item["next_configuration"] = self.clamp_and_normalize(next_config_tensor)
+            item["action"] = item["next_configuration"] - item["configuration"]
             
             # Reward is goal if the next state equals the last expert state;
             # otherwise it's the step reward. We compare normalized states to
@@ -601,6 +639,7 @@ class StateRewardDataset(Base):
                 if is_goal_transition
                 else torch.as_tensor(self.step_reward).float()
             )
+            item["done"] = torch.as_tensor(is_goal_transition).float()
 
         return item
 
@@ -665,6 +704,7 @@ class DataModule:
                     collision_reward=self.collision_reward,
                     step_reward=self.step_reward,
                 )
+                cprint("Loaded StateRewardDataset for training", "purple")
             else:
                 self.data_train = StateDataset.load_from_directory(
                     self.robot,
@@ -676,6 +716,7 @@ class DataModule:
                     num_target_points=self.num_target_points,
                     random_scale=self.random_scale,
                 )
+                cprint("Loaded StateDataset for training", "green")
             self.data_val_state = StateDataset.load_from_directory(
                 self.robot,
                 self.data_dir,
@@ -765,7 +806,7 @@ class DataModule:
         """
         return DataLoader(
             self.data_train,
-            self.train_batch_size,
+            batch_size=self.train_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=True,

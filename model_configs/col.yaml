@@ -25,16 +25,13 @@ training_model_parameters:
   collision_loss_weight: 5 # collision loss weight
   collision_loss_margin: 0.03 # how close to obstacle to be considered collision [m]
   point_match_loss_weight: 1 # point match loss (BC loss) weight for agent 
-  one_step_Q_weight: 1 # one-step Q-learning loss weight for critic
+  one_step_q_weight: 1 # one-step Q-learning loss weight for critic
   agent_loss_weight: 1 # agent loss weight for actor
   min_lr: 1.0e-5
   max_lr: 5.0e-5
   warmup_steps: 5000
-  pretraining_steps: 10000 # how many steps to pretrain for before sampling from agent's replay buffer
-  replay_buffer_fraction: 0.75 # what fraction of samples to sample from agent's replay buffer after pre-training
   decay_rate: null # 0.999
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
-  train_batch_size: 10
   disable_viz: true
 
 data_module_parameters:
@@ -56,8 +53,12 @@ shared_parameters:
 
 num_workers: 6
 checkpoint_interval: 30
-n_agent_rollouts: 1000 # how many agent rollouts to run
+val_every_n_fraction: 0.2
+pretraining_steps: 10000 # how many steps to pretrain for before sampling from agent's replay buffer
 agent_rollouts_every_n_batches: 1000 # how often to run agent rollouts
+n_agent_rollouts: 1000 # how many agent rollouts to run each time
+replay_buffer_capacity: 1000000
+expert_denominator: 4 # 1/expert_denominator is the fraction of samples to sample from expert loader during fine-tuning
 gpus: 1
 train_batch_size: 12
 val_batch_size: 12
