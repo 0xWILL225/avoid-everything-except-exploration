@@ -21,11 +21,14 @@
 # DEALINGS IN THE SOFTWARE.
 
 import argparse
+import logging
 import os
 import random
+import sys
+import uuid
 import gc
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import psutil
 from tqdm import tqdm
 import time
@@ -36,12 +39,17 @@ import numpy as np
 import torch
 import yaml
 from lightning.pytorch.loggers import WandbLogger  # Fabric can use PL loggers
+from torch.nn.utils import clip_grad_norm_
 
 from avoid_everything.col.col import CoLMotionPolicyTrainer
 from avoid_everything.data_loader import DataModule
 from avoid_everything.col.mixed_batch_provider import MixedBatchProvider
 from avoid_everything.col.replay import ReplayBuffer
 
+# Set up the project to allow imports without installing
+# Could be removed if this was refactored as a Python package
+PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+sys.path.insert(0, PROJECT_ROOT)
 
 # Make deterministic-ish
 SEED_VALUE = 42
@@ -69,15 +77,15 @@ def log_memory_usage(stage: str):
     )
 
 
-def setup_fabric(n_gpus: int) -> Fabric:
+def setup_fabric() -> Fabric:
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
-    return Fabric(accelerator=accelerator, devices=n_gpus)
+    return Fabric(accelerator=accelerator, devices=1)
 
-def setup_logger(should_log: bool, experiment_name: str, config_values: Dict[str, Any], project_name: str = "avoid-everything"):
+def setup_logger(should_log: bool, experiment_name: str, config_values: Dict[str, Any]):
     if not should_log:
-        cprint("Disabling all logs", "red")
+        print("Disabling all logs")
         return None
-    logger = WandbLogger(name=experiment_name, project=project_name, log_model=True)
+    logger = WandbLogger(name=experiment_name, project="avoid-everything", log_model=True)
     try:
         logger.log_hyperparams(config_values)
     except Exception:
@@ -107,9 +115,6 @@ def run():
     """
     Runs the training procedure
     """
-
-    ### ========================================================================
-    ### MOVE THIS SECTION TO if __name__ == "__main__": and call run with hparam args
     config = parse_args_and_configuration()
     logger = setup_logger(not config["no_logging"], config["experiment_name"], config)
     
@@ -119,8 +124,7 @@ def run():
     max_val_batches = None
     # Limit epochs for smoke testing unless disabled
     if os.environ.get("AE_SMOKE", "1") == "1" or bool(config.get("mintest", False)):
-        # restrics number of batches for debugging runs
-        max_train_batches = 100 
+        max_train_batches = 100
         max_val_batches = 100
         max_epochs = min(max_epochs, 1)
     val_every_frac = config.get("val_every_n_fraction", None)
@@ -130,13 +134,8 @@ def run():
     val_every_batches = None if val_every_batches is None else int(val_every_batches)
     val_every_epochs = None if val_every_epochs is None else int(val_every_epochs)
     ckpt_minutes = int(config.get("checkpoint_interval", 0))
-    pretraining_steps = int(config.get("pretraining_steps", 10000))
-    train_batch_size = config["train_batch_size"]
-    expert_denominator = int(config.get("expert_denominator", 4))
-    ### ========================================================================
-
-
-    base_save_dir = config["save_checkpoint_dir"]
+    log_every_n_steps = int(config.get("log_every_n_steps", 100))
+    base_save_dir = config.get("save_checkpoint_dir", str(Path(PROJECT_ROOT) / "checkpoints"))
     run_id = None
     if logger is not None:
         try:
@@ -149,10 +148,13 @@ def run():
     log_memory_usage("Start")
 
     
-    fabric = setup_fabric(config["n_gpus"])
+    fabric = setup_fabric()
     fabric.launch()
     log_memory_usage("After fabric setup")
 
+    pretraining_steps = int(config.get("pretraining_steps", 10000))
+    train_batch_size = config["train_batch_size"]
+    expert_denominator = int(config.get("expert_denominator", 4))
     adjusted_train_batch_size = max(1, int(round(train_batch_size / expert_denominator)))
     dm = DataModule(
         train_batch_size=10 if config["mintest"] else adjusted_train_batch_size,
@@ -173,8 +175,8 @@ def run():
         dataset=dm.data_train,
     )
     mixed_provider = MixedBatchProvider(expert_loader=expert_loader, agent_replay=replay_buffer)
-    val_state_loader = fabric.setup_dataloaders(dm.val_state_dataloader(), move_to_device=False)
-    val_trajectory_loader = fabric.setup_dataloaders(dm.val_trajectory_dataloader(), move_to_device=False)
+    val_loaders = dm.val_dataloader()
+    val_loaders = [fabric.setup_dataloaders(v, move_to_device=False) for v in val_loaders]
 
     trainer = CoLMotionPolicyTrainer(
         replay_buffer=replay_buffer,
@@ -184,7 +186,7 @@ def run():
 
     log_memory_usage("After model creation")
 
-    # clear any cached memory before training
+    # Clear any cached memory before training
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -208,7 +210,55 @@ def run():
     # now that actor/critic are on the right device, let trainer initialize
     trainer.setup()
 
+    
+    def validate_epoch(max_batches: Optional[int] = None):
+        trainer.actor.eval()
+        trainer.critic.eval()
+        n_batches = max_batches if max_batches is not None else len(val_loaders[0])
+        assert n_batches > 0, "No validation batches to run"
+        with torch.no_grad():
+            # Smoke test: run only the first validation loader using fast state-based metrics
+            if len(val_loaders) > 0:
+                vdl = val_loaders[0]
+                vbar = tqdm(vdl, total=min(len(vdl), n_batches), desc="Validation", leave=False)
+                bcount = 0
+                for batch in vbar:
+                    batch = {k: (v.to(fabric.device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                    trainer.state_validation_step(batch)
+                    bcount += 1
+                    if bcount >= n_batches:
+                        break
+        # Print and log metrics
+        metrics = {k: v for k, v in getattr(trainer, "logged_metrics", {}).items()}
+        # Add validation metric aggregates from torchmetrics
+        try:
+            metrics.update({
+                "val_point_match_loss": float(trainer.val_point_match_loss.compute().item()),
+                "val_collision_loss": float(trainer.val_collision_loss.compute().item()),
+                "val_loss": float(trainer.val_loss.compute().item()),
+            })
+        except Exception:
+            pass
+        # Always include current learning rate
+        try:
+            metrics["lr"] = float(actor_optim.param_groups[0]["lr"])  
+        except Exception:
+            pass
+        if metrics:
+            print(metrics)
+            if logger is not None:
+                try:
+                    logger.log_metrics(metrics, step=global_step)
+                except Exception:
+                    pass
+
     n_batches = max_train_batches if max_train_batches is not None else len(expert_loader)
+
+    validate_every = None
+    if val_every_frac is not None:
+        validate_every = max(1, int(n_batches * float(val_every_frac)))
+    elif val_every_batches is not None:
+        validate_every = max(1, int(val_every_batches))
 
     last_ckpt_time = time.time()
     global_step = 0
@@ -232,16 +282,41 @@ def run():
                 actor_optim=actor_optim,
                 critic_optim=critic_optim,
                 actor_scheduler=actor_sch,
-                critic_scheduler=critic_sch
+                critic_scheduler=critic_sch,
+                step_idx=global_step,
             )
-            if global_step % int(config.get("collect_rollouts_every_n_steps", 100)) == 0:
-                trainer.agent_rollout(batch)
             global_step += 1
+            
+            # l_bc, l_q1, l_actor = trainer.state_based_step(batch)
+            # total = (trainer.point_match_loss_weight * l_bc +
+            #          trainer.one_step_q_weight       * l_q1 +
+            #          trainer.agent_loss_weight       * l_actor)
+
+            # # 1) Critic step on L_Q1
+            # critic_optim.zero_grad(set_to_none=True)
+            # fabric.backward(l_q1)
+            # clip_grad_norm_(trainer.critic.parameters(), max_norm=1.0)
+            # critic_optim.step()
+            # if critic_sch is not None:
+            #     critic_sch.step()
+
+            # # 2) Actor step on L_A + (optionally) λ_BC * BC  -- CoL uses combined loss; common pattern is actor gets L_A, BC applies to actor, too.
+            # actor_loss_total = (trainer.agent_loss_weight * l_actor +
+            #                     trainer.point_match_loss_weight * l_bc)
+            # actor_optim.zero_grad(set_to_none=True)
+            # fabric.backward(actor_loss_total)
+            # clip_grad_norm_(trainer.actor.parameters(), max_norm=1.0)
+            # actor_optim.step()
+            # if actor_sch is not None:
+            #     actor_sch.step()
+
+            # # 3) Polyak update
+            # trainer.polyak_update(tau=0.005)
 
             if logger and (global_step % int(config.get("log_every_n_steps", 100)) == 0):
                 logger.log_metrics(metrics | {"step": global_step}, step=global_step)
 
-            # advance batch_idx and epoch_bar by expert_denominator steps during pretraining, else by 1
+            # Advance by expert_denominator during pretraining, else by 1
             prev_idx = batch_idx
             increment = expert_denominator if pretraining else 1
             batch_idx = min(n_batches, batch_idx + increment)
@@ -249,13 +324,32 @@ def run():
                 epoch_bar.set_postfix(loss=float(metrics["loss"]), batch=f"{batch_idx}/{n_batches}")
                 epoch_bar.update(batch_idx - prev_idx)
 
-            if logger and (global_step % int(config.get("validate_every_n_steps", 5000)) == 0):
-                if show_bar:
-                    print(f"\nValidation at global step {global_step}")
-                val_metrics = trainer.validate_state_epoch(val_state_loader, fabric, max_batches=max_val_batches)
-                val_metrics.update(trainer.validate_rollout_epoch(val_trajectory_loader, fabric, max_batches=max_val_batches))
-                if logger:
-                    logger.log_metrics(val_metrics, step=global_step)
+            
+
+
+            # if logger is not None and (global_step % log_every_n_steps == 0):
+            #     current_lr = float(actor_optim.param_groups[0]["lr"])
+            #     try:
+            #         train_metrics = {
+            #             "train_loss": float(total.detach().item()),
+            #             "point_match_loss": float(trainer.logged_metrics.get("point_match_loss", float('nan'))),
+            #             "collision_loss": float(trainer.logged_metrics.get("collision_loss", float('nan'))),
+            #             "one_step_Q_loss": float(trainer.logged_metrics.get("one_step_Q_loss", float('nan'))),
+            #             "agent_loss": float(trainer.logged_metrics.get("agent_loss", float('nan'))),
+            #             "lr": current_lr,
+            #         }
+            #         logger.log_metrics(train_metrics, step=global_step)
+            #     except Exception:
+            #         pass
+
+            # periodic validation within epoch: trigger when crossing boundary
+            if validate_every is not None:
+                crossed_boundary = (prev_idx // validate_every) != (batch_idx // validate_every)
+                if crossed_boundary:
+                    if show_bar:
+                        print(f"\nValidation at batch {batch_idx}/{n_batches}")
+                    trainer.validate_state_epoch(val_state_loader, fabric, max_batches=max_val_batches)
+                    trainer.validate_rollout_epoch(val_trajectory_loader, fabric, max_batches=max_val_batches)
 
             # periodic checkpointing based on wall time
             if ckpt_minutes > 0 and (time.time() - last_ckpt_time) / 60.0 >= ckpt_minutes:
@@ -271,6 +365,9 @@ def run():
                 print(f"Saved checkpoint to {ckpt_path}")
                 last_ckpt_time = time.time()
 
+            # if batch_idx >= n_batches:
+            #     break
+
         # End of epoch validation
         do_epoch_val = True
         if val_every_epochs is not None:
@@ -278,10 +375,8 @@ def run():
         if do_epoch_val:
             if show_bar:
                 print(f"\nEnd of epoch {epoch+1} validation")
-            val_metrics = trainer.validate_state_epoch(val_state_loader, fabric, max_batches=max_val_batches)
-            val_metrics.update(trainer.validate_rollout_epoch(val_trajectory_loader, fabric, max_batches=max_val_batches))
-            if logger:
-                logger.log_metrics(val_metrics, step=global_step)
+            trainer.validate_state_epoch(val_state_loader, fabric, max_batches=max_val_batches)
+            trainer.validate_rollout_epoch(val_trajectory_loader, fabric, max_batches=max_val_batches)
 
     print("Finished Fabric training run.")
 

@@ -20,15 +20,12 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
 from robofin.robots import Robot
 from robofin.samplers import TorchRobotSampler
-
-from avoid_everything.geometry import TorchCuboids, TorchCylinders
-
 
 def point_match_loss(
     input_pc: torch.Tensor, target_pc: torch.Tensor, reduction="mean"
@@ -76,47 +73,43 @@ class CoLLossFn:
                 use_cache=True,
                 device=device,
             )
+        assert self.fk_sampler.device == device, "Sampler device mismatch"
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
         assert self.fk_sampler is not None
         return self.fk_sampler.sample(q)
 
-    def bc_pointcloud_loss(self, pred_q_norm: torch.Tensor, target_q_norm: torch.Tensor, reduction: str="mean") -> torch.Tensor:
+    def bc_pointcloud_loss(self, pred_q_unnorm: torch.Tensor, target_q_unnorm: torch.Tensor, reduction: str="mean") -> torch.Tensor:
         """
         Same BC loss as original Avoid Everything: compare sampled robot 
         point clouds at predicted vs target configurations.
         """
-        self._ensure_fk(pred_q_norm.device)
-        pred_pc   = self.sample(pred_q_norm)[..., :3]
-        target_pc = self.sample(target_q_norm)[..., :3]
+        self._ensure_fk(pred_q_unnorm.device)
+        pred_pc   = self.sample(pred_q_unnorm)[..., :3]
+        target_pc = self.sample(target_q_unnorm)[..., :3]
         return point_match_loss(pred_pc, target_pc, reduction=reduction)
 
     # ---------- RL losses from CoL ----------
-    @torch.no_grad()
-    def _build_next_pc(self, batch: dict[str, torch.Tensor], q_next: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Build s' point cloud & labels quickly:
-          - reuse current scene+target points from batch["point_cloud"][labels!=0]
-          - resample robot points from q_next
-        """
-        self._ensure_fk(q_next.device)
-        pc  = batch["point_cloud"]          # [B,N,3]
-        lab = batch["point_cloud_labels"]   # [B,N,1]
-        B   = pc.size(0)
+    # @torch.no_grad()
+    # def _build_next_pc(self, batch: dict[str, torch.Tensor], q_next: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     Build next state's (s') point cloud & labels quickly:
+    #       - reuse current scene+target points from batch["point_cloud"][labels!=0]
+    #       - resample robot points from q_next
+    #     """
+    #     self._ensure_fk(q_next.device)
+    #     pc  = batch["point_cloud"]          # [B,N,3]
+    #     B   = pc.size(0)
 
-        # non-robot points are static (scene+target)
-        mask = (lab.squeeze(-1) != 0)                 # [B,N]
-        mask3 = mask.unsqueeze(-1).expand_as(pc)
-        non_robot_pts = pc[mask3].view(B, -1, 3)      # [B, N_scene+N_target, 3]
-        non_robot_labs = lab[mask].view(B, -1, 1)     # [B, N_scene+N_target, 1]
+    #     # non-robot points are static (scene+target)
+    #     mask3 = mask.unsqueeze(-1).expand_as(pc)
+    #     non_robot_pts = pc[mask3].view(B, -1, 3)      # [B, N_scene+N_target, 3]
 
-        # robot points at next state
-        qn_pc = self.sample(q_next)[..., :3]          # [B, N_robot, 3]
-        zeros = torch.zeros((B, qn_pc.size(1), 1), device=pc.device, dtype=lab.dtype)
+    #     # robot points at next state
+    #     qn_pc = self.sample(q_next)[..., :3]          # [B, N_robot, 3]
 
-        pc_next   = torch.cat([qn_pc, non_robot_pts], dim=1)    # [B, N_total, 3]
-        lab_next  = torch.cat([zeros, non_robot_labs], dim=1)   # [B, N_total, 1]
-        return pc_next, lab_next
+    #     pc_next   = torch.cat([qn_pc, non_robot_pts], dim=1)    # [B, N_total, 3]
+    #     return pc_next
 
     def q1_and_actor_losses(
         self,
@@ -126,18 +119,22 @@ class CoLLossFn:
         target_actor: Callable,
         target_critic: Callable,
         batch: dict[str, torch.Tensor],
-        gamma: float,
+        next_point_cloud: torch.Tensor,
         pc_bounds: torch.Tensor,
+        gamma: float,
         huber_delta: Optional[float] = None,
+        
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Implements CoL's RL pieces:
-          L_Q1 = 1/2 * || r + γ (1-done) Q'(s', π'(s')) - Q(s,a) ||^2
+        Implements CoL's RL loss components:
+          L_Q1 = 1/2 * || r + gamma * (1-done) Q'(s', π'(s')) - Q(s,a) ||^2
           L_A  = - E_s [ Q(s, π(s)) ]
         Shapes:
           - batch["configuration"], ["next_configuration"], ["action"] in normalized joint space
-          - batch["reward"] is [B,1]; batch["done"] is [B,1] in {0,1}
-          - batch["point_cloud"], ["point_cloud_labels"] for current state
+          - batch["reward"] is [B,1]; 
+          - batch["done"] is [B,1] in {0,1}
+          - batch["point_cloud"] and next_point_cloud is [B, N_total, 3] 
+          - batch["point_cloud_labels"] is [B, N_total, 1]
         """
         q      = batch["configuration"]          # [B,DOF]
         a      = batch["action"]                 # [B,DOF]
@@ -148,25 +145,23 @@ class CoLLossFn:
         # Q(s,a)
         q_sa = critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, pc_bounds)  # [B,1]
 
-        # Build s' and compute target action a' = π'(s')
-        pc_next, lab_next = self._build_next_pc(batch, q_next)
-
-        a_next = target_actor(lab_next, pc_next, q_next, pc_bounds)
-        if a_next.dim() == 3:  # your actor often returns [B,1,DOF]
-            a_next = a_next[:, -1, :]
+        # compute target action a' = π'(s')
+        a_next = target_actor(batch["point_cloud_labels"], next_point_cloud, q_next, pc_bounds)
+        a_next = (a_next[:, -1, :] if a_next.dim()==3 else a_next) # TODO: check necessity of this
 
         # y = r + γ (1 - done) Q'(s', a')
         with torch.no_grad():
-            q_next_target = target_critic(lab_next, pc_next, q_next, a_next, pc_bounds)  # [B,1]
+            q_next_target = target_critic(
+                batch["point_cloud_labels"], next_point_cloud, q_next, a_next, pc_bounds)  # [B,1]
             y = r + gamma * (1.0 - done) * q_next_target
 
-        # Critic loss (MSE or Huber)
+        # critic loss (MSE or Huber)
         if huber_delta is None:
             l_q1 = 0.5 * F.mse_loss(q_sa, y)
         else:
-            l_q1 = F.huber_loss(q_sa, y, delta=huber_delta)
+            l_q1 = F.huber_loss(q_sa, y, delta=huber_delta) # TODO: evaluate value of huber loss
 
-        # Actor loss: L_A = - E[ Q(s, π(s)) ]
+        # actor loss: L_A = - E[ Q(s, π(s)) ]
         a_pi = actor(batch["point_cloud_labels"], batch["point_cloud"], q, pc_bounds)
         if a_pi.dim() == 3:
             a_pi = a_pi[:, -1, :]

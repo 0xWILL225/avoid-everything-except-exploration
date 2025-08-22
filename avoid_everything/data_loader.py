@@ -821,9 +821,35 @@ class DataModule:
             shuffle=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_state_dataloader(self) -> DataLoader:
         """
-        A Pytorch lightning method to get the dataloader for validation
+        Method to get the dataloader for validation states
+
+        :rtype DataLoader: The validation state dataloader
+        """
+        return DataLoader(
+            self.data_val_state,
+            self.train_batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def val_trajectory_dataloader(self) -> DataLoader:
+        """
+        Method to get the dataloader for validation trajectories
+
+        :rtype DataLoader: The validation trajectory dataloader
+        """
+        return DataLoader(
+            self.data_val,
+            self.val_batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def val_dataloaders(self) -> DataLoader:
+        """
+        A Pytorch lightning method to get the dataloaders for validation
 
         :rtype DataLoader: The validation dataloader
         """
