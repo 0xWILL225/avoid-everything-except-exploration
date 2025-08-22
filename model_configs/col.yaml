@@ -21,18 +21,17 @@
 # DEALINGS IN THE SOFTWARE.
 
 training_model_parameters:
-  robot_dof: 7
-  point_match_loss_weight: 1  # point match loss (BC loss) weight for actor
-  actor_loss_weight: 1 # RL actor loss weight
+  robot_dof: 7  # robot's degrees of freedom
+  point_match_loss_weight: 1.0  # point match loss (BC loss) weight for actor
+  actor_loss_weight: 1.0        # RL actor loss weight
   min_lr: 1.0e-5
   max_lr: 5.0e-5
-  warmup_steps: 5000
+  warmup_steps: 5000   # number of steps to warm up the learning rate linearly from min_lr to max_lr
   weight_decay: 1e-4   # weight decay for AdamW optimizers
   gamma: 0.99          # discount factor for Q-learning
   tau: 0.005           # target network's soft update rate
   grad_clip_norm: 1.0  # gradient clipping norm
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
-  disable_viz: true
 
 data_module_parameters:
   data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
@@ -47,25 +46,23 @@ shared_parameters:
   num_robot_points: 2048
   urdf_path: /workspace/assets/panda/panda_spheres.urdf
   # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
-  goal_reward: 100.0 # reward for reaching the goal
+  goal_reward: 100.0      # reward for reaching the goal
   collision_reward: -10.0 # reward for colliding with an obstacle
-  step_reward: -1.0 # reward for each step
+  step_reward: -1.0       # reward for each step that doesn't terminate the episode
 
-num_workers: 6
-checkpoint_interval: 30 # how often to save checkpoints [minutes]
-val_every_n_steps: 5000 # how often to run validation epochs
-pretraining_steps: 10000 # how many steps to pretrain for before starting to sample from actor's replay buffer
-collect_rollouts_every_n_steps: 1000 # how often to collect actor rollouts for the replay buffer
-replay_buffer_capacity: 1000000
-expert_denominator: 4 # 1/expert_denominator is the fraction of samples to sample from expert loader during fine-tuning
-n_gpus: 1
-train_batch_size: 12
-val_batch_size: 12
-max_epochs: 100
-use_simple_model: false
-stop_early: false
-mintest: false
-no_logging: false
+num_workers: 6                       # number of CPU workers for the data loaders
+checkpoint_interval: 30              # how often to save model checkpoints [minutes]
+pretraining_steps: 10000             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
+validate_every_n_steps: 5000         # how often to run validation epochs [global steps]
+collect_rollouts_every_n_steps: 1000 # how often to collect actor rollouts for the replay buffer [global steps]
+log_every_n_steps: 100               # how often to log metrics to wandb [global steps]
+replay_buffer_capacity: 1000000      # capacity of the replay buffer [number of transitions]
+n_gpus: 1                            # number of GPUs to use for training
+train_batch_size: 12                 # batch size for training, ideally divisible by expert_fraction_denom
+expert_fraction_denom: 4             # 1/expert_fraction_denom is the fraction of samples to sample from expert loader during fine-tuning
+max_epochs: 100                      # maximum number of epochs to train for
+mintest: false                       # true: run minimal test run for debugging
+logging: true                        # true: log to wandb
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Cretin: Avoid Everything Except Exploration"
 description: "Testing CoL training"

@@ -154,8 +154,8 @@ def run():
 
     pretraining_steps = int(config.get("pretraining_steps", 10000))
     train_batch_size = config["train_batch_size"]
-    expert_denominator = int(config.get("expert_denominator", 4))
-    adjusted_train_batch_size = max(1, int(round(train_batch_size / expert_denominator)))
+    expert_fraction_denom = int(config.get("expert_fraction_denom", 4))
+    adjusted_train_batch_size = max(1, int(round(train_batch_size / expert_fraction_denom)))
     dm = DataModule(
         train_batch_size=10 if config["mintest"] else adjusted_train_batch_size,
         val_batch_size=10 if config["mintest"] else config["val_batch_size"],
@@ -271,7 +271,7 @@ def run():
             pretraining: bool = global_step < pretraining_steps
             mixed = mixed_provider.sample(
                 train_batch_size,
-                expert_denominator=expert_denominator,
+                expert_fraction_denom=expert_fraction_denom,
                 pretraining=pretraining,
             )
             batch = trainer.move_batch_to_device(mixed, fabric.device)
@@ -316,9 +316,9 @@ def run():
             if logger and (global_step % int(config.get("log_every_n_steps", 100)) == 0):
                 logger.log_metrics(metrics | {"step": global_step}, step=global_step)
 
-            # Advance by expert_denominator during pretraining, else by 1
+            # Advance by expert_fraction_denom during pretraining, else by 1
             prev_idx = batch_idx
-            increment = expert_denominator if pretraining else 1
+            increment = expert_fraction_denom if pretraining else 1
             batch_idx = min(n_batches, batch_idx + increment)
             if show_bar:
                 epoch_bar.set_postfix(loss=float(metrics["loss"]), batch=f"{batch_idx}/{n_batches}")

@@ -1,3 +1,8 @@
+"""
+This file contains the CoLLossFn class, which is responsible for calculating
+the loss functions for the CoL motion policy.
+"""
+
 # MIT License
 #
 # Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
@@ -24,8 +29,12 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
+
 from robofin.robots import Robot
 from robofin.samplers import TorchRobotSampler
+
+from avoid_everything.geometry import TorchCuboids, TorchCylinders
+
 
 def point_match_loss(
     input_pc: torch.Tensor, target_pc: torch.Tensor, reduction="mean"
@@ -44,6 +53,57 @@ def point_match_loss(
         input_pc, target_pc, reduction=reduction
     )
 
+def collision_loss(
+    input_pc: torch.Tensor,
+    cuboid_centers: torch.Tensor,
+    cuboid_dims: torch.Tensor,
+    cuboid_quaternions: torch.Tensor,
+    cylinder_centers: torch.Tensor,
+    cylinder_radii: torch.Tensor,
+    cylinder_heights: torch.Tensor,
+    cylinder_quaternions: torch.Tensor,
+    margin,
+    reduction="mean",
+) -> torch.Tensor:
+    """
+    Calculates the hinge loss, calculating whether the robot (represented as a
+    point cloud) is in collision with any obstacles in the scene. Collision
+    here actually means within 3cm of the obstacle--this is to provide stronger
+    gradient signal to encourage the robot to move out of the way. Also, some 
+    of the primitives can have zero volume (i.e. a dim is zero for cuboids or 
+    radius or height is zero for cylinders). If these are zero volume, they 
+    will have infinite sdf values (and therefore be ignored by the loss).
+
+    :param input_pc torch.Tensor: Points sampled from the robot's surface after it
+                                  is placed at the network's output prediction. Has dim [B, N, 3]
+    :param cuboid_centers torch.Tensor: Has dim [B, M1, 3]
+    :param cuboid_dims torch.Tensor: Has dim [B, M1, 3]
+    :param cuboid_quaternions torch.Tensor: Has dim [B, M1, 4]. Quaternion is formatted as w, x, y, z.
+    :param cylinder_centers torch.Tensor: Has dim [B, M2, 3]
+    :param cylinder_radii torch.Tensor: Has dim [B, M2, 1]
+    :param cylinder_heights torch.Tensor: Has dim [B, M2, 1]
+    :param cylinder_quaternions torch.Tensor: Has dim [B, M2, 4]. Quaternion is formatted as w, x, y, z.
+    :rtype torch.Tensor: Returns the loss value aggregated over the batch
+    """
+
+    cuboids = TorchCuboids(
+        cuboid_centers,
+        cuboid_dims,
+        cuboid_quaternions,
+    )
+    cylinders = TorchCylinders(
+        cylinder_centers,
+        cylinder_radii,
+        cylinder_heights,
+        cylinder_quaternions,
+    )
+    sdf_values = torch.minimum(cuboids.sdf(input_pc), cylinders.sdf(input_pc))
+    return F.hinge_embedding_loss(
+        sdf_values,
+        -torch.ones_like(sdf_values),
+        margin=margin,
+        reduction=reduction,
+    )
 
 class CoLLossFn:
     """
@@ -56,11 +116,13 @@ class CoLLossFn:
     def __init__(
         self,
         urdf_path: str,
+        collision_margin: float,
     ):
         self.urdf_path = urdf_path
         self.robot = None
         self.fk_sampler = None
         self.num_points = 1024
+        self.collision_margin = collision_margin
 
     def _ensure_fk(self, device: torch.device):
         if self.fk_sampler is None:
@@ -88,28 +150,6 @@ class CoLLossFn:
         pred_pc   = self.sample(pred_q_unnorm)[..., :3]
         target_pc = self.sample(target_q_unnorm)[..., :3]
         return point_match_loss(pred_pc, target_pc, reduction=reduction)
-
-    # ---------- RL losses from CoL ----------
-    # @torch.no_grad()
-    # def _build_next_pc(self, batch: dict[str, torch.Tensor], q_next: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    #     """
-    #     Build next state's (s') point cloud & labels quickly:
-    #       - reuse current scene+target points from batch["point_cloud"][labels!=0]
-    #       - resample robot points from q_next
-    #     """
-    #     self._ensure_fk(q_next.device)
-    #     pc  = batch["point_cloud"]          # [B,N,3]
-    #     B   = pc.size(0)
-
-    #     # non-robot points are static (scene+target)
-    #     mask3 = mask.unsqueeze(-1).expand_as(pc)
-    #     non_robot_pts = pc[mask3].view(B, -1, 3)      # [B, N_scene+N_target, 3]
-
-    #     # robot points at next state
-    #     qn_pc = self.sample(q_next)[..., :3]          # [B, N_robot, 3]
-
-    #     pc_next   = torch.cat([qn_pc, non_robot_pts], dim=1)    # [B, N_total, 3]
-    #     return pc_next
 
     def q1_and_actor_losses(
         self,
@@ -159,7 +199,7 @@ class CoLLossFn:
         if huber_delta is None:
             l_q1 = 0.5 * F.mse_loss(q_sa, y)
         else:
-            l_q1 = F.huber_loss(q_sa, y, delta=huber_delta) # TODO: evaluate value of huber loss
+            l_q1 = F.huber_loss(q_sa, y, delta=huber_delta) # TODO: any reason to use huber loss?
 
         # actor loss: L_A = - E[ Q(s, π(s)) ]
         a_pi = actor(batch["point_cloud_labels"], batch["point_cloud"], q, pc_bounds)
@@ -168,3 +208,43 @@ class CoLLossFn:
         l_actor = -critic(batch["point_cloud_labels"], batch["point_cloud"], q, a_pi, pc_bounds).mean()
 
         return l_q1, l_actor
+
+    def collision_loss(
+        self,
+        unnormalized_q: torch.Tensor,
+        cuboid_centers: torch.Tensor,
+        cuboid_dims: torch.Tensor,
+        cuboid_quaternions: torch.Tensor,
+        cylinder_centers: torch.Tensor,
+        cylinder_radii: torch.Tensor,
+        cylinder_heights: torch.Tensor,
+        cylinder_quaternions: torch.Tensor,
+        reduction="mean",
+    ) -> torch.Tensor:
+        """
+        This method calculates the collision loss.
+
+        :param unnormalized_q torch.Tensor: Unnormalized configuration, has dim [B, DOF]
+        :param cuboid_centers torch.Tensor: Has dim [B, M1, 3]
+        :param cuboid_dims torch.Tensor: Has dim [B, M1, 3]
+        :param cuboid_quaternions torch.Tensor: Has dim [B, M1, 4]. Quaternion is formatted as w, x, y, z.
+        :param cylinder_centers torch.Tensor: Has dim [B, M2, 3]
+        :param cylinder_radii torch.Tensor: Has dim [B, M2, 1]
+        :param cylinder_heights torch.Tensor: Has dim [B, M2, 1]
+        :param cylinder_quaternions torch.Tensor: Has dim [B, M2, 4]. Quaternion is formatted as w, x, y, z.
+        :rtype torch.Tensor: The collision loss value aggregated over the batch
+        """
+        self._ensure_fk(unnormalized_q.device)
+        input_pc = self.sample(unnormalized_q)[..., :3]
+        return collision_loss(
+            input_pc,
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quaternions,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quaternions,
+            self.collision_margin,
+            reduction=reduction,
+        )

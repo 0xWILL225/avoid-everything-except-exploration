@@ -7,7 +7,7 @@ agent transitions sampled from a replay sampler. It is designed to:
 - Avoid storing the full expert dataset in memory
 - Keep batches consistent with the dict[str, torch.Tensor] schema expected by training
 - Support a pretraining phase (100% expert) and a CoL phase
-  (1 / expert_denominator expert, remainder from agent replay)
+  (1 / expert_fraction_denom expert, remainder from agent replay)
 """
 
 from typing import Any, Dict, Iterable, List, Optional
@@ -161,7 +161,7 @@ class MixedBatchProvider:
     def sample(
         self,
         total_batch_size: int,
-        expert_denominator: int,
+        expert_fraction_denom: int,
         *,
         pretraining: bool,
     ) -> Dict[str, torch.Tensor]:
@@ -169,12 +169,12 @@ class MixedBatchProvider:
 
         During pretraining (``pretraining=True``) the batch is 100% expert. In
         CoL RL-finetuning mode (``pretraining=False``), this returns 
-        1/expert_denominator of the batch from the expert stream and the 
+        1/expert_fraction_denom of the batch from the expert stream and the 
         remainder from the agent replay.
 
         Parameters:
             total_batch_size: Exact batch size to return.
-            expert_denominator: Denominator controlling expert share after
+            expert_fraction_denom: Denominator controlling expert share after
                 pretraining (e.g., 4 -> 25% expert, 75% agent).
             pretraining: If True, returns only expert samples.
 
@@ -183,9 +183,9 @@ class MixedBatchProvider:
             identical to those produced by the expert loader (renamed per
             `key_renames`), and matching shapes across sources.
         """
-        assert expert_denominator >= 1
+        assert expert_fraction_denom >= 1
         # Always ensure exact total by allocating expert fraction then filling rest with agent
-        n_expert_samples = total_batch_size if pretraining else (total_batch_size // expert_denominator)
+        n_expert_samples = total_batch_size if pretraining else (total_batch_size // expert_fraction_denom)
         # Put any remainder into agent portion so sums to exactly total_batch_size
         n_agent_samples = total_batch_size - n_expert_samples
 
