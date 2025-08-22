@@ -635,11 +635,11 @@ class StateRewardDataset(Base):
                 item["next_configuration"], last_state_norm, rtol=1e-6, atol=1e-6
             )
             item["reward"] = (
-                torch.as_tensor(self.goal_reward).float()
+                torch.as_tensor(self.goal_reward).float().unsqueeze(0)
                 if is_goal_transition
-                else torch.as_tensor(self.step_reward).float()
+                else torch.as_tensor(self.step_reward).float().unsqueeze(0)
             )
-            item["done"] = torch.as_tensor(is_goal_transition).float()
+            item["done"] = torch.as_tensor(is_goal_transition).float().unsqueeze(0)
 
         return item
 
@@ -704,7 +704,7 @@ class DataModule:
                     collision_reward=self.collision_reward,
                     step_reward=self.step_reward,
                 )
-                cprint("Loaded StateRewardDataset for training", "purple")
+                cprint("Loaded StateRewardDataset for training", "green")
             else:
                 self.data_train = StateDataset.load_from_directory(
                     self.robot,

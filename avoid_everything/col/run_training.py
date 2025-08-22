@@ -55,10 +55,6 @@ random.seed(SEED_VALUE)
 np.random.seed(SEED_VALUE)
 torch.set_float32_matmul_precision("high")
 
-def setup_fabric(n_gpus: int) -> Fabric:
-    accelerator = "gpu" if torch.cuda.is_available() else "cpu"
-    return Fabric(accelerator=accelerator, devices=n_gpus)
-
 def setup_logger(
     should_log: bool,
     experiment_name: str,
@@ -110,18 +106,14 @@ def run():
     run_id = str(logger.version) if logger is not None else "default"
     save_dir = Path(base_save_dir) / run_id
     os.makedirs(save_dir, exist_ok=True)
-    print(f"Experiment name: {config['experiment_name']}")
+    cprint(f"Experiment name: {config['experiment_name']}", "blue")
 
-    fabric = setup_fabric(config["n_gpus"])
+    fabric = Fabric(accelerator="gpu", devices=config["n_gpus"])
     fabric.launch()
 
-    adjusted_train_batch_size = int(round(config["train_batch_size"] / config["expert_fraction_denom"]))
-    assert adjusted_train_batch_size > 0
-    cprint(f"train batch size: {config['train_batch_size']}", "green")
-    cprint(f"expert denominator: {config['expert_fraction_denom']}", "green")
-    cprint(f"Adjusted train batch size: {adjusted_train_batch_size}", "green")
     dm = DataModule(
-        train_batch_size=10 if config["mintest"] else adjusted_train_batch_size,
+        train_batch_size=10 if config["mintest"] else config["train_batch_size"],
+        val_batch_size=10 if config["mintest"] else config["val_batch_size"],
         num_workers=(
             0 if config["mintest"] else config["num_workers"]
         ),
@@ -130,6 +122,12 @@ def run():
     )
     dm.setup("fit")
     expert_loader = fabric.setup_dataloaders(dm.train_dataloader(), move_to_device=False)
+    val_state_loader = fabric.setup_dataloaders(
+        dm.val_state_dataloader(), move_to_device=False)
+    val_trajectory_loader = fabric.setup_dataloaders(
+        dm.val_trajectory_dataloader(), move_to_device=False)
+    assert isinstance(val_state_loader, DataLoader)
+    assert isinstance(val_trajectory_loader, DataLoader)
     replay_buffer = ReplayBuffer(
         capacity=config["replay_buffer_capacity"],
         urdf_path=config["shared_parameters"]["urdf_path"],
@@ -139,12 +137,6 @@ def run():
     )
     mixed_provider = MixedBatchProvider(
         expert_loader=expert_loader, agent_replay=replay_buffer)
-    val_state_loader = fabric.setup_dataloaders(
-        dm.val_state_dataloader(), move_to_device=False)
-    val_trajectory_loader = fabric.setup_dataloaders(
-        dm.val_trajectory_dataloader(), move_to_device=False)
-    assert isinstance(val_state_loader, DataLoader)
-    assert isinstance(val_trajectory_loader, DataLoader)
 
     trainer = CoLMotionPolicyTrainer(
         replay_buffer=replay_buffer,
@@ -192,9 +184,9 @@ def run():
         batch_idx = 0
         for _ in range(n_batches):
             pretraining: bool = global_step < config["pretraining_steps"]
-            mixed = mixed_provider.sample(
+            mixed, data_loader_iterations = mixed_provider.sample(
                 config["train_batch_size"],
-                expert_fraction_denom=config["expert_fraction_denom"],
+                expert_fraction=config["expert_fraction"],
                 pretraining=pretraining,
             )
             batch = trainer.move_batch_to_device(mixed, fabric.device)
@@ -214,17 +206,15 @@ def run():
             if logger and (global_step % config["log_every_n_steps"] == 0):
                 logger.log_metrics(metrics | {"step": global_step}, step=global_step)
 
-            # advance batch_idx and epoch_bar by expert_fraction_denom steps during pretraining, else by 1
-            prev_idx = batch_idx
-            increment = config["expert_fraction_denom"] if pretraining else 1
-            batch_idx = min(n_batches, batch_idx + increment)
+            # increment with the number of batches consumed from the expert loader
+            batch_idx += data_loader_iterations
             if show_bar:
                 epoch_bar.set_postfix(loss=float(metrics["loss"]), batch=f"{batch_idx}/{n_batches}")
-                epoch_bar.update(batch_idx - prev_idx)
+                epoch_bar.update(data_loader_iterations)
 
             if logger and (global_step % config["validate_every_n_steps"] == 0):
                 if show_bar:
-                    print(f"\nValidation at global step {global_step}")
+                    cprint(f"\nValidation at global step {global_step}", "blue")
                 val_metrics = trainer.validate_state_epoch(
                     val_state_loader, fabric, max_batches=max_val_batches)
                 val_metrics.update(trainer.validate_rollout_epoch(
@@ -243,12 +233,12 @@ def run():
                     "actor_sch": actor_sch.state_dict(),
                     "critic_sch": critic_sch.state_dict()
                 },)
-                print(f"Saved checkpoint to {ckpt_path}")
+                cprint(f"Saved checkpoint to {ckpt_path}", "green")
                 last_ckpt_time = time.time()
 
         # end of epoch validation
         if show_bar:
-            print(f"\nEnd of epoch {epoch+1} validation")
+            cprint(f"\nEnd of epoch {epoch+1} validation", "blue")
         val_metrics = trainer.validate_state_epoch(
             val_state_loader, fabric, max_batches=max_val_batches)
         val_metrics.update(trainer.validate_rollout_epoch(
@@ -256,7 +246,7 @@ def run():
         if logger:
             logger.log_metrics(val_metrics, step=global_step)
 
-    print("Finished Fabric training run.")
+    cprint("Finished Fabric training run.", "green")
 
 if __name__ == "__main__":
     run()

@@ -35,14 +35,14 @@ class CoLMotionPolicyTrainer():
         replay_buffer: ReplayBuffer,
         urdf_path: str,
         num_robot_points: int,
+        collision_reward: float,
+        goal_reward: float,
+        step_reward: float,
         robot_dof: int,
         point_match_loss_weight: float,
         collision_loss_weight: float,
         actor_loss_weight: float,
-        collision_margin: float,
-        collision_reward: float,
-        goal_reward: float,
-        step_reward: float,
+        collision_loss_margin: float,
         min_lr: float,
         max_lr: float,
         warmup_steps: int,
@@ -62,7 +62,7 @@ class CoLMotionPolicyTrainer():
         self.point_match_loss_weight = point_match_loss_weight
         self.collision_loss_weight = collision_loss_weight
         self.actor_loss_weight = actor_loss_weight
-        self.loss_fun = CoLLossFn(self.urdf_path, collision_margin)
+        self.loss_fun = CoLLossFn(self.urdf_path, collision_loss_margin)
         self.min_lr = min_lr
         self.max_lr = max_lr
         self.warmup_steps = warmup_steps
@@ -141,7 +141,7 @@ class CoLMotionPolicyTrainer():
         for tgt, src in zip(self.target_critic.parameters(), self.critic.parameters()):
             tgt.data.lerp_(src.data, tau)
 
-    def verify_device(self) -> torch.device:
+    def _verify_device(self) -> torch.device:
         """
         Resolve current device from model parameters.
         """
@@ -155,7 +155,7 @@ class CoLMotionPolicyTrainer():
         Device-critical initialization. Call after moving model to the desired 
         device. Initializes robot and point cloud sampler on current device.
         """
-        self.device = self.verify_device()
+        self.device = self._verify_device()
         assert str(self.device) != "cpu", "You do not want to train on CPU"
         self.robot = Robot(self.urdf_path, device=self.device)
         self.fk_sampler = TorchRobotSampler(
@@ -334,11 +334,11 @@ class CoLMotionPolicyTrainer():
             q_next_unn = self.robot.unnormalize_joints(q_next)
 
             # termination & reward at q_next
-            reached = self.check_reaching_success(
+            reached = self._check_reaching_success(
                 q_next_unn,
                 batch["target_position"][active],
                 batch["target_orientation"][active])
-            collided = self.check_for_collisions(
+            collided = self._check_for_collisions(
                 q_next_unn, cuboids[active], cylinders[active])
             done = reached | collided
             r_t = torch.where(collided, self.collision_reward,
@@ -368,7 +368,7 @@ class CoLMotionPolicyTrainer():
             tmp = active.nonzero(as_tuple=False).squeeze(1)
             active[tmp] = still
 
-    def check_reaching_success(
+    def _check_reaching_success(
         self,
         q_unnorm: torch.Tensor,
         target_position: torch.Tensor,
@@ -392,7 +392,7 @@ class CoLMotionPolicyTrainer():
         orient_errors = torch.abs(torch.rad2deg(torch.acos(cos_value)))
         return torch.logical_and(orient_errors < 15, pos_errors < 0.01) # less than 15 degrees and 1cm
 
-    def check_for_collisions(
+    def _check_for_collisions(
         self, q_unnorm: torch.Tensor, cuboids: TorchCuboids, cylinders: TorchCylinders
     ) -> torch.Tensor:
         """

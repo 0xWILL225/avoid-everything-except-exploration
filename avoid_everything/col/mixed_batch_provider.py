@@ -10,25 +10,9 @@ agent transitions sampled from a replay sampler. It is designed to:
   (1 / expert_fraction_denom expert, remainder from agent replay)
 """
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 from avoid_everything.col.replay import ReplayBuffer
-
-# class ReplaySampler(Protocol):
-#     """Minimal interface required from an agent replay buffer/sampler.
-
-#     Implementations must return a batch of transitions as a dictionary of
-#     tensors with a consistent first (batch) dimension across values.
-
-#     Parameters:
-#         batch_size: Number of samples to draw.
-
-#     Returns:
-#         A dict[str, torch.Tensor] representing a batch of transitions.
-#     """
-
-#     def sample(self, batch_size: int) -> Dict[str, torch.Tensor]: ...
-
 
 def _to_tensor(x: Any) -> torch.Tensor:
     """Convert a scalar or tensor-like to a torch.Tensor (on CPU).
@@ -100,7 +84,10 @@ class MixedBatchProvider:
         self._key_renames = key_renames or {}
         self.agent_replay = agent_replay
 
-    def _split_batch_to_items(self, expert_batch: Dict[str, torch.Tensor]) -> List[Dict[str, torch.Tensor]]:
+    def _split_batch_to_items(
+        self,
+        expert_batch: Dict[str, torch.Tensor],
+    ) -> List[Dict[str, torch.Tensor]]:
         """Split a batched expert dictionary into a list of per-sample dicts.
 
         Each tensor value in the input dict is sliced along dim=0 to produce
@@ -126,78 +113,80 @@ class MixedBatchProvider:
             items.append(item)
         return items
 
-    def _fill_expert_pool(self, required_samples: int) -> None:
+    def _fill_expert_pool(self, required_samples: int) -> int:
         """Fill the internal expert pool up to `required_samples` items.
 
         Pulls batches from the expert iterator and appends per-sample entries
         to the pool until the requested minimum is satisfied. The iterator is
         reset upon exhaustion (StopIteration), providing an infinite stream if
         desired.
+
+        Returns:
+            The number of data loader iterations used to fill the pool.
         """
+        data_loader_iterations = 0
         while len(self._expert_pool) < required_samples:
             try:
                 batch = next(self._expert_iter)
             except StopIteration:
                 self._expert_iter = iter(self._expert_loader)
                 batch = next(self._expert_iter)
+            data_loader_iterations += 1
             self._expert_pool.extend(self._split_batch_to_items(batch))
+        return data_loader_iterations
 
-    def _pop_expert(self, expert_samples: int) -> Dict[str, torch.Tensor]:
+    def _pop_expert(self, expert_samples: int) -> Tuple[Dict[str, torch.Tensor], int]:
         """Remove and return `expert_samples` items from the pool as a batched dict.
 
         Parameters:
             expert_samples: Number of expert samples to return. If zero, returns an empty dict.
 
         Returns:
-            A dictionary with tensors of shape [expert_samples, ...].
+            A dictionary with tensors of shape [expert_samples, ...] and the 
+            number of data loader iterations used to fill the pool.
         """
         if expert_samples <= 0:
-            return {}
-        self._fill_expert_pool(expert_samples)
+            return {}, 0
+        data_loader_iterations = self._fill_expert_pool(expert_samples)
         items = self._expert_pool[:expert_samples]
         del self._expert_pool[:expert_samples]
-        return _collate(items)
+        return _collate(items), data_loader_iterations
 
     def sample(
         self,
         total_batch_size: int,
-        expert_fraction_denom: int,
-        *,
+        expert_fraction: float,
         pretraining: bool,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[Dict[str, torch.Tensor], int]:
         """Draw a mixed batch of expert and agent transitions.
 
         During pretraining (``pretraining=True``) the batch is 100% expert. In
         CoL RL-finetuning mode (``pretraining=False``), this returns 
-        1/expert_fraction_denom of the batch from the expert stream and the 
+        expert_fraction of the batch from the expert stream and the 
         remainder from the agent replay.
 
         Parameters:
             total_batch_size: Exact batch size to return.
-            expert_fraction_denom: Denominator controlling expert share after
-                pretraining (e.g., 4 -> 25% expert, 75% agent).
+            expert_fraction: Fraction of samples to sample from expert loader during fine-tuning.
             pretraining: If True, returns only expert samples.
 
         Returns:
-            A dictionary of tensors representing a full batch, with keys
-            identical to those produced by the expert loader (renamed per
-            `key_renames`), and matching shapes across sources.
+            A dictionary of tensors representing a full batch and the number of 
+            expert data loader iterations used to fill the batch.
         """
-        assert expert_fraction_denom >= 1
-        # Always ensure exact total by allocating expert fraction then filling rest with agent
-        n_expert_samples = total_batch_size if pretraining else (total_batch_size // expert_fraction_denom)
-        # Put any remainder into agent portion so sums to exactly total_batch_size
+        assert expert_fraction >= 0.0 and expert_fraction <= 1.0
+        n_expert_samples = total_batch_size if pretraining else int(round(total_batch_size * expert_fraction))
         n_agent_samples = total_batch_size - n_expert_samples
 
-        expert_batch = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
+        expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
         agent_batch  = self.agent_replay.sample(n_agent_samples) if n_agent_samples > 0 else {}
 
         if n_expert_samples == 0:
             agent_batch["is_expert"] = torch.zeros(n_agent_samples, 1)
-            return agent_batch
+            return agent_batch, 0
         if n_agent_samples == 0:
             expert_batch["is_expert"] = torch.ones(n_expert_samples, 1)
-            return expert_batch
+            return expert_batch, data_loader_iterations
 
         common = expert_batch.keys() & agent_batch.keys()
         merged = {k: torch.cat([expert_batch[k], agent_batch[k]], dim=0) for k in common}
@@ -206,4 +195,4 @@ class MixedBatchProvider:
         for k in merged:
             merged[k] = merged[k][perm]
         merged["is_expert"] = is_expert[perm]
-        return merged
+        return merged, data_loader_iterations

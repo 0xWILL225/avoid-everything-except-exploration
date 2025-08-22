@@ -116,13 +116,13 @@ class CoLLossFn:
     def __init__(
         self,
         urdf_path: str,
-        collision_margin: float,
+        collision_loss_margin: float,
     ):
         self.urdf_path = urdf_path
         self.robot = None
         self.fk_sampler = None
         self.num_points = 1024
-        self.collision_margin = collision_margin
+        self.collision_loss_margin = collision_loss_margin
 
     def _ensure_fk(self, device: torch.device):
         if self.fk_sampler is None:
@@ -245,6 +245,6 @@ class CoLLossFn:
             cylinder_radii,
             cylinder_heights,
             cylinder_quaternions,
-            self.collision_margin,
+            self.collision_loss_margin,
             reduction=reduction,
         )
