@@ -640,6 +640,7 @@ class StateRewardDataset(Base):
                 else torch.as_tensor(self.step_reward).float().unsqueeze(0)
             )
             item["done"] = torch.as_tensor(is_goal_transition).float().unsqueeze(0)
+            item["is_expert"] = torch.ones(1, dtype=torch.float32)
 
         return item
 
@@ -717,16 +718,33 @@ class DataModule:
                     random_scale=self.random_scale,
                 )
                 cprint("Loaded StateDataset for training", "green")
-            self.data_val_state = StateDataset.load_from_directory(
-                self.robot,
-                self.data_dir,
-                dataset_type=DatasetType.VAL_STATE,
-                trajectory_key=self.val_trajectory_key,
-                num_robot_points=self.num_robot_points,
-                num_obstacle_points=self.num_obstacle_points,
-                num_target_points=self.num_target_points,
-                random_scale=0.0,
-            )
+            if self.include_reward:
+                self.data_val_state = StateRewardDataset.load_from_directory(
+                    self.robot,
+                    self.data_dir,
+                    dataset_type=DatasetType.VAL_STATE,
+                    trajectory_key=self.val_trajectory_key,
+                    num_robot_points=self.num_robot_points,
+                    num_obstacle_points=self.num_obstacle_points,
+                    num_target_points=self.num_target_points,
+                    random_scale=0.0,
+                    goal_reward=self.goal_reward,
+                    collision_reward=self.collision_reward,
+                    step_reward=self.step_reward,
+                )
+                cprint("Loaded StateRewardDataset for validation", "green")
+            else:
+                self.data_val_state = StateDataset.load_from_directory(
+                    self.robot,
+                    self.data_dir,
+                    dataset_type=DatasetType.VAL_STATE,
+                    trajectory_key=self.val_trajectory_key,
+                    num_robot_points=self.num_robot_points,
+                    num_obstacle_points=self.num_obstacle_points,
+                    num_target_points=self.num_target_points,
+                    random_scale=0.0,
+                )
+                cprint("Loaded StateDataset for validation", "green")
             self.data_val = TrajectoryDataset.load_from_directory(
                 self.robot,
                 self.data_dir,
@@ -737,6 +755,7 @@ class DataModule:
                 num_target_points=self.num_target_points,
                 random_scale=0.0,
             )
+            cprint("Loaded TrajectoryDataset for validation", "green")
             # Handle missing optional validation files gracefully
             mini_train_path = Path(self.data_dir) / "val" / "mini_train.hdf5"
             if mini_train_path.exists():
@@ -751,6 +770,7 @@ class DataModule:
                         num_target_points=self.num_target_points,
                         random_scale=0.0,
                     )
+                    cprint("Loaded TrajectoryDataset for mini_train", "green")
                 except Exception:
                     self.data_mini_train = self.data_val
             else:
@@ -770,6 +790,7 @@ class DataModule:
                         num_target_points=self.num_target_points,
                         random_scale=0.0,
                     )
+                    cprint("Loaded TrajectoryDataset for val_pretrain", "green")
                 except:
                     self.data_val_pretrain = self.data_val
             else:
@@ -786,6 +807,7 @@ class DataModule:
                 dataset_type=DatasetType.TEST,
                 random_scale=self.random_scale,
             )
+            cprint("Loaded StateDataset for testing", "green")
         if stage == "dagger":
             self.data_dagger = TrajectoryDataset.load_from_directory(
                 self.robot,
@@ -797,6 +819,7 @@ class DataModule:
                 num_target_points=self.num_target_points,
                 random_scale=0.0,
             )
+            cprint("Loaded TrajectoryDataset for dagger", "green")
 
     def train_dataloader(self) -> DataLoader:
         """
@@ -810,6 +833,7 @@ class DataModule:
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=True,
+            persistent_workers=False if self.num_workers == 0 else True,
         )
 
     def dagger_dataloader(self) -> DataLoader:
@@ -832,6 +856,7 @@ class DataModule:
             self.train_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=False if self.num_workers == 0 else True,
         )
 
     def val_trajectory_dataloader(self) -> DataLoader:
@@ -845,6 +870,7 @@ class DataModule:
             self.val_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=False if self.num_workers == 0 else True,
         )
 
     def val_dataloaders(self) -> DataLoader:

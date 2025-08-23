@@ -134,5 +134,6 @@ class ReplayBuffer:
             "cylinder_quats": cylinder_quats,
             "target_position": target_position,
             "target_orientation": target_orientation,
+            "is_expert": torch.zeros(B, 1, dtype=torch.float32),
         }
         return batch

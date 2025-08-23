@@ -2,12 +2,12 @@
 Mixed batch sampling utilities for Cycle-of-Learning.
 
 This module streams expert transitions from a DataLoader and mixes them with
-agent transitions sampled from a replay sampler. It is designed to:
+actor transitions sampled from a replay sampler. It is designed to:
 
 - Avoid storing the full expert dataset in memory
 - Keep batches consistent with the dict[str, torch.Tensor] schema expected by training
 - Support a pretraining phase (100% expert) and a CoL phase
-  (1 / expert_fraction_denom expert, remainder from agent replay)
+  (1 / expert_fraction_denom expert, remainder from actor replay)
 """
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -52,7 +52,7 @@ def _collate(items: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
 class MixedBatchProvider:
     """
-    Streams expert transitions from a DataLoader and mixes them with agent samples
+    Streams expert transitions from a DataLoader and mixes them with actor samples
     drawn from a replay sampler.
 
     The provider does not pre-load or store the entire expert dataset; instead it
@@ -64,7 +64,7 @@ class MixedBatchProvider:
     def __init__(
         self,
         expert_loader: Iterable[Any],
-        agent_replay: ReplayBuffer,
+        actor_replay: ReplayBuffer,
         *,
         key_renames: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -82,7 +82,7 @@ class MixedBatchProvider:
         self._expert_iter = iter(self._expert_loader)
         self._expert_pool: List[Dict[str, torch.Tensor]] = []
         self._key_renames = key_renames or {}
-        self.agent_replay = agent_replay
+        self.actor_replay = actor_replay
 
     def _split_batch_to_items(
         self,
@@ -158,12 +158,12 @@ class MixedBatchProvider:
         expert_fraction: float,
         pretraining: bool,
     ) -> Tuple[Dict[str, torch.Tensor], int]:
-        """Draw a mixed batch of expert and agent transitions.
+        """Draw a mixed batch of expert and actor transitions.
 
         During pretraining (``pretraining=True``) the batch is 100% expert. In
         CoL RL-finetuning mode (``pretraining=False``), this returns 
         expert_fraction of the batch from the expert stream and the 
-        remainder from the agent replay.
+        remainder from the actor replay.
 
         Parameters:
             total_batch_size: Exact batch size to return.
@@ -176,23 +176,19 @@ class MixedBatchProvider:
         """
         assert expert_fraction >= 0.0 and expert_fraction <= 1.0
         n_expert_samples = total_batch_size if pretraining else int(round(total_batch_size * expert_fraction))
-        n_agent_samples = total_batch_size - n_expert_samples
+        n_actor_samples = total_batch_size - n_expert_samples
 
         expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
-        agent_batch  = self.agent_replay.sample(n_agent_samples) if n_agent_samples > 0 else {}
+        actor_batch  = self.actor_replay.sample(n_actor_samples) if n_actor_samples > 0 else {}
 
         if n_expert_samples == 0:
-            agent_batch["is_expert"] = torch.zeros(n_agent_samples, 1)
-            return agent_batch, 0
-        if n_agent_samples == 0:
-            expert_batch["is_expert"] = torch.ones(n_expert_samples, 1)
+            return actor_batch, 0
+        if n_actor_samples == 0:
             return expert_batch, data_loader_iterations
 
-        common = expert_batch.keys() & agent_batch.keys()
-        merged = {k: torch.cat([expert_batch[k], agent_batch[k]], dim=0) for k in common}
-        is_expert = torch.cat([torch.ones(n_expert_samples,1), torch.zeros(n_agent_samples,1)], dim=0)
+        common = expert_batch.keys() & actor_batch.keys()
+        merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
         perm = torch.randperm(total_batch_size)
         for k in merged:
             merged[k] = merged[k][perm]
-        merged["is_expert"] = is_expert[perm]
         return merged, data_loader_iterations

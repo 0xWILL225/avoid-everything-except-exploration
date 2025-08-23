@@ -28,13 +28,13 @@ training_model_parameters:
   actor_loss_weight: 1.0        # RL actor loss weight
   min_lr: 1.0e-5
   max_lr: 5.0e-5
-  warmup_steps: 5000   # number of steps to warm up the learning rate linearly from min_lr to max_lr
-  weight_decay: 1e-4   # weight decay for AdamW optimizers
-  gamma: 0.99          # discount factor for Q-learning
-  tau: 0.005           # target network's soft update rate
-  grad_clip_norm: 1.0  # gradient clipping norm
+  warmup_steps: 5000    # number of steps to warm up the learning rate linearly from min_lr to max_lr
+  weight_decay: 1.0e-4  # weight decay for AdamW optimizers
+  gamma: 0.99           # discount factor for Q-learning
+  tau: 0.005            # target network's soft update rate
+  grad_clip_norm: 1.0   # gradient clipping norm
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]  # bounds for the point clouds
-  rollout_length: 69   # number of steps to rollout for the actor
+  rollout_length: 69    # number of steps to rollout for the actor
 
 data_module_parameters:
   data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
@@ -56,17 +56,21 @@ shared_parameters:
 num_workers: 6                       # number of CPU workers for the data loaders
 checkpoint_interval: 30              # how often to save model checkpoints [minutes]
 pretraining_steps: 10000             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
-validate_every_n_steps: 5000         # how often to run validation epochs [global steps]
+validate_every_n_steps: 1000         # how often to run mid-epoch validation epochs [global steps]
 collect_rollouts_every_n_steps: 1000 # how often to collect actor rollouts for the replay buffer [global steps]
 log_every_n_steps: 100               # how often to log metrics to wandb [global steps]
 replay_buffer_capacity: 1000000      # capacity of the replay buffer [number of transitions]
 n_gpus: 1                            # number of GPUs to use for training
 train_batch_size: 12                 # batch size for training
 val_batch_size: 12                   # batch size for validation
+mid_epoch_max_val_batches: 100       # maximum number of batches to validate on during mid-epoch validation
+mid_epoch_max_val_rollouts: 20       # maximum number of rollouts to validate on during mid-epoch validation
+end_epoch_max_val_batches: 100       # maximum number of batches to validate on at end-of-epoch validation
+end_epoch_max_val_rollouts: 20       # maximum number of rollouts to validate on at end-of-epoch validation
 expert_fraction: 0.25                # fraction of samples to sample from expert loader during fine-tuning
 max_epochs: 100                      # maximum number of epochs to train for
-mintest: true                       # true: run minimal test run for debugging
-logging: false                        # true: log to wandb
+mintest: false                       # true: run minimal test run for debugging
+logging: true                        # true: log to wandb
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Cretin: Avoid Everything Except Exploration"
 description: "Testing CoL training"

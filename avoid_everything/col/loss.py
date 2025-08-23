@@ -47,7 +47,7 @@ def point_match_loss(
                                   Has dim [B, N, 3]
     :param target_pc torch.Tensor: Point cloud sampled from the supervision
                                    Has dim [B, N, 3]
-    :rtype torch.Tensor: The single loss value
+    :rtype torch.Tensor: The loss
     """
     return F.mse_loss(input_pc, target_pc, reduction=reduction) + F.l1_loss(
         input_pc, target_pc, reduction=reduction
@@ -141,67 +141,110 @@ class CoLLossFn:
         assert self.fk_sampler is not None
         return self.fk_sampler.sample(q)
 
-    def bc_pointcloud_loss(self, pred_q_unnorm: torch.Tensor, expert_q_unnorm: torch.Tensor, reduction: str="mean") -> torch.Tensor:
-        """
-        Same BC loss as original Avoid Everything: compare sampled robot 
-        point clouds at predicted vs expert configurations.
-        """
-        self._ensure_fk(pred_q_unnorm.device)
-        pred_pc   = self.sample(pred_q_unnorm)[..., :3]
-        expert_pc = self.sample(expert_q_unnorm)[..., :3]
-        return point_match_loss(pred_pc, expert_pc, reduction=reduction)
+    # def bc_pointcloud_loss(
+    #     self,
+    #     pred_q_unnorm: torch.Tensor,
+    #     expert_q_unnorm: torch.Tensor,
+    #     is_expert: torch.Tensor,
+    #     reduction: str="mean",
+    # ) -> torch.Tensor:
+    #     """
+    #     Same BC loss as original Avoid Everything: compare sampled robot 
+    #     point clouds at predicted vs expert configurations.
+    #     """
+    #     self._ensure_fk(pred_q_unnorm.device)
+    #     pred_pc   = self.sample(pred_q_unnorm)[..., :3]
+    #     expert_pc = self.sample(expert_q_unnorm)[..., :3]
+    #     return point_match_loss(pred_pc, expert_pc, reduction=reduction)
 
-    def q1_and_actor_losses(
+    def bc_pointcloud_loss(
         self,
         *,
-        actor: Callable,
-        critic: Callable,
-        target_actor: Callable,
-        target_critic: Callable,
-        batch: dict[str, torch.Tensor],
-        next_point_cloud: torch.Tensor,
-        pc_bounds: torch.Tensor,
-        gamma: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pred_q_unnorm: torch.Tensor,
+        expert_q_unnorm: torch.Tensor,
+        is_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        Implements CoL's RL loss components:
-          L_Q1 = 1/2 * || r + gamma * (1-done) * Q'(s', π'(s')) - Q(s,a) ||^2
-          L_A  = - E_s [ Q(s, π(s)) ]
-        Shapes:
-          - batch["configuration"], ["next_configuration"], ["action"] [B,DOF]
-            in normalized joint space
-          - batch["reward"] is [B,1]
-          - batch["done"] is [B,1] in {0,1}
-          - batch["point_cloud"] and next_point_cloud are [B, N_total, 3]
-          - batch["point_cloud_labels"] is [B, N_total, 1]
+        Behavioral cloning loss in point-cloud space, masked to expert rows.
+
+        Returns a scalar: mean over expert samples of
+        MSE(pred_pc, expert_pc) + L1(pred_pc, expert_pc)
+        where both MSE and L1 are computed elementwise (reduction='none'),
+        then averaged over points & coords per sample.
         """
-        q      = batch["configuration"]          # [B,DOF]
-        a      = batch["action"]                 # [B,DOF]
-        q_next = batch["next_configuration"]     # [B,DOF]
-        r      = batch["reward"]                 # [B,1]
-        done   = batch["done"]                   # [B,1]
+        self._ensure_fk(pred_q_unnorm.device)
+        pred_pc   = self.sample(pred_q_unnorm)[..., :3]   # [B, N, 3]
+        expert_pc = self.sample(expert_q_unnorm)[..., :3] # [B, N, 3]
 
-        # Q(s,a)
-        q_sa = critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, pc_bounds)  # [B,1]
+        # elementwise loss: [B, N, 3]
+        per_elem = point_match_loss(pred_pc, expert_pc, reduction="none")
+        # per-sample scalar: [B]
+        per_sample = per_elem.mean(dim=(1, 2))
 
-        # compute target action a' = π'(s')
-        a_next = target_actor(batch["point_cloud_labels"], next_point_cloud, q_next, pc_bounds)
-        a_next = (a_next[:, -1, :] if a_next.dim()==3 else a_next) # TODO: check necessity of this
+        if is_expert is None:
+            return per_sample.mean()
 
-        # y = r + gamma * (1 - done) * Q'(s', a')
-        with torch.no_grad():
-            q_next_target = target_critic(
-                batch["point_cloud_labels"], next_point_cloud, q_next, a_next, pc_bounds)  # [B,1]
-            y = r + gamma * (1.0 - done) * q_next_target # y is called R_1 in CoL paper
-        loss_q1 = F.mse_loss(q_sa, y)
+        # mask to expert rows only
+        mask = is_expert
+        if mask.dim() > 1:
+            mask = mask.squeeze(-1)
+        mask = mask.to(dtype=per_sample.dtype)
 
-        # actor loss: L_A = - E[ Q(s, π(s)) ]
-        a_pi = actor(batch["point_cloud_labels"], batch["point_cloud"], q, pc_bounds)
-        if a_pi.dim() == 3:
-            a_pi = a_pi[:, -1, :]
-        loss_actor = -critic(batch["point_cloud_labels"], batch["point_cloud"], q, a_pi, pc_bounds).mean()
+        denom = mask.sum().clamp_min(1.0)
+        return (per_sample * mask).sum() / denom
 
-        return loss_q1, loss_actor
+
+    # def q1_and_actor_losses(
+    #     self,
+    #     *,
+    #     actor: Callable,
+    #     critic: Callable,
+    #     target_actor: Callable,
+    #     target_critic: Callable,
+    #     batch: dict[str, torch.Tensor],
+    #     next_point_cloud: torch.Tensor,
+    #     pc_bounds: torch.Tensor,
+    #     gamma: float,
+    # ) -> tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     Implements CoL's RL loss components:
+    #       L_Q1 = 1/2 * || r + gamma * (1-done) * Q'(s', π'(s')) - Q(s,a) ||^2
+    #       L_A  = - E_s [ Q(s, π(s)) ]
+    #     Shapes:
+    #       - batch["configuration"], ["next_configuration"], ["action"] [B,DOF]
+    #         in normalized joint space
+    #       - batch["reward"] is [B,1]
+    #       - batch["done"] is [B,1] in {0,1}
+    #       - batch["point_cloud"] and next_point_cloud are [B, N_total, 3]
+    #       - batch["point_cloud_labels"] is [B, N_total, 1]
+    #     """
+    #     q      = batch["configuration"]          # [B,DOF]
+    #     a      = batch["action"]                 # [B,DOF]
+    #     q_next = batch["next_configuration"]     # [B,DOF]
+    #     r      = batch["reward"]                 # [B,1]
+    #     done   = batch["done"]                   # [B,1]
+
+    #     # Q(s,a)
+    #     q_sa = critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, pc_bounds)  # [B,1]
+
+    #     # compute target action a' = π'(s')
+    #     a_next = target_actor(batch["point_cloud_labels"], next_point_cloud, q_next, pc_bounds)
+    #     a_next = (a_next[:, -1, :] if a_next.dim()==3 else a_next) # TODO: check necessity of this
+
+    #     # y = r + gamma * (1 - done) * Q'(s', a')
+    #     with torch.no_grad():
+    #         q_next_target = target_critic(
+    #             batch["point_cloud_labels"], next_point_cloud, q_next, a_next, pc_bounds)  # [B,1]
+    #         y = r + gamma * (1.0 - done) * q_next_target # y is called R_1 in CoL paper
+    #     loss_q1 = F.mse_loss(q_sa, y)
+
+    #     # actor loss: L_A = - E[ Q(s, π(s)) ]
+    #     a_pi = actor(batch["point_cloud_labels"], batch["point_cloud"], q, pc_bounds)
+    #     if a_pi.dim() == 3:
+    #         a_pi = a_pi[:, -1, :]
+    #     loss_actor = -critic(batch["point_cloud_labels"], batch["point_cloud"], q, a_pi, pc_bounds).mean()
+
+    #     return loss_q1, loss_actor
 
     def collision_loss(
         self,

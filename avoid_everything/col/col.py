@@ -171,6 +171,18 @@ class CoLMotionPolicyTrainer():
         self.actor.train()
         self.critic.train()
 
+        # never need gradients for target networks
+        self.target_actor.eval()
+        self.target_critic.eval()
+
+        # move all metrics to the same device
+        for m in [self.val_position_error, self.val_orientation_error,
+                  self.val_collision_rate, self.val_funnel_collision_rate,
+                  self.val_reaching_success_rate, self.val_success_rate,
+                  self.val_point_match_loss, self.val_collision_loss,
+                  self.val_loss]:
+            m.to(self.device)
+
     def get_device(self) -> torch.device:
         """
         Get the device of the trainer.
@@ -178,15 +190,30 @@ class CoLMotionPolicyTrainer():
         assert self.device is not None, "You must call setup() before getting the device"
         return self.device
 
+    # def move_batch_to_device(
+    #     self,
+    #     batch: Dict[str, torch.Tensor],
+    #     device: torch.device,
+    # ) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Move a batch of data to the desired device.
+    #     """
+    #     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+
     def move_batch_to_device(
-        self,
-        batch: Dict[str, torch.Tensor],
-        device: torch.device,
+        self, batch: Dict[str, torch.Tensor], device: torch.device, non_blocking: bool=False
     ) -> Dict[str, torch.Tensor]:
         """
         Move a batch of data to the desired device.
         """
-        return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+        out = {}
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                out[k] = v.to(device, non_blocking=non_blocking)
+            else:
+                out[k] = v
+        return out
+
 
     def _sample(self, q: torch.Tensor) -> torch.Tensor:
         """
@@ -199,24 +226,23 @@ class CoLMotionPolicyTrainer():
         points = self.fk_sampler.sample(q)
         return points
 
-    def _state_based_step(
+    def _actor_bc_losses(
         self,
         batch: dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute the three CoL losses on a mixed batch (expert + agent):
-        - BC point-cloud loss   (L_BC)
-        - one-step critic loss  (L_Q1)
-        - actor Q-loss          (L_A)
-        Returns (L_BC, L_Q1, L_A). Combine with your weights outside or here.
+        Actor-side losses on current networks:
+        - L_BC: BC point cloud loss (predicted q_next vs expert q_next)
+        - L_A:  actor loss = -E[Q(s, π(s))]
         """
         pc_labels = batch["point_cloud_labels"]
         pc        = batch["point_cloud"]
         q         = batch["configuration"]          # [B, DOF] normalized
-        q_next     = batch["next_configuration"]     # [B, DOF] normalized
+        q_next    = batch["next_configuration"]     # [B, DOF] normalized
+        is_expert = batch["is_expert"]
 
         # actor forward for BC: predicted next q via Δq
-        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)   # [B,1,DOF] or [B,DOF]
+        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
         a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
         q_pred  = torch.clamp(q + a_pred, -1, 1)
 
@@ -226,22 +252,55 @@ class CoLMotionPolicyTrainer():
         loss_bc = self.loss_fun.bc_pointcloud_loss(
             pred_q_unnorm=self.robot.unnormalize_joints(q_pred),
             expert_q_unnorm=q_next_unn,
-            reduction="mean",
+            is_expert=is_expert,
         )
 
-        # RL losses (critic TD target + actor Q-loss)
+        # actor loss: -Q(s, π(s))
+        a_pi = self.actor(pc_labels, pc, q, self.pc_bounds)
+        if a_pi.dim() == 3:
+            a_pi = a_pi[:, -1, :]
+
+        # don't backprop into critic
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+        loss_actor = -self.critic(pc_labels, pc, q, a_pi, self.pc_bounds).mean()
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
+        return loss_bc, loss_actor
+
+    def _critic_loss(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        One-step TD loss for critic using target networks.
+        """
+        q      = batch["configuration"]
+        a      = batch["action"]
+        q_next = batch["next_configuration"]
+        r      = batch["reward"]
+        done   = batch.get("done", torch.zeros_like(r))
+
+        # build s' point cloud by sampling robot at q_next
+        assert self.robot is not None
+        q_next_unn = self.robot.unnormalize_joints(q_next)
         robot_pc = self._sample(q_next_unn)[..., :3]
-        next_point_cloud = batch["point_cloud"].clone()
-        next_point_cloud[:, : robot_pc.size(1)] = robot_pc
+        next_pc = batch["point_cloud"].clone()
+        next_pc[:, : robot_pc.size(1)] = robot_pc
 
-        loss_q1, loss_actor = self.loss_fun.q1_and_actor_losses(
-            actor=self.actor, critic=self.critic,
-            target_actor=self.target_actor, target_critic=self.target_critic,
-            batch=batch, next_point_cloud=next_point_cloud,
-            pc_bounds=self.pc_bounds, gamma=self.gamma, huber_delta=None
-        )
+        # target action a' = π'(s')
+        a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
+        if a_next.dim() == 3:
+            a_next = a_next[:, -1, :]
 
-        return loss_bc, loss_q1, loss_actor
+        with torch.no_grad():
+            q_next_target = self.target_critic(
+                batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
+            )
+            y = r + self.gamma * (1.0 - done) * q_next_target
+
+        q_sa = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        return torch.nn.functional.mse_loss(q_sa, y)
 
     def train_step(
         self,
@@ -253,7 +312,7 @@ class CoLMotionPolicyTrainer():
         critic_scheduler,
     ) -> Dict[str, float]:
         """
-        One training iteration on a mixed (expert + agent) batch.
+        One training iteration on a mixed (expert + actor) batch.
         Calculates losses and performs optimization.
 
         Computes L_BC, L_Q1, L_A via self._state_based_step(), then:
@@ -263,9 +322,8 @@ class CoLMotionPolicyTrainer():
 
         Returns a flat dict of scalars for logging.
         """
-        loss_bc, loss_q1, loss_actor = self._state_based_step(batch)
-
-        # critic update on one-step TD loss
+        # critic update on one-step TD loss first (keeps actor graph clean)
+        loss_q1 = self._critic_loss(batch)
         critic_optim.zero_grad(set_to_none=True)
         fabric.backward(loss_q1)
         clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
@@ -273,6 +331,7 @@ class CoLMotionPolicyTrainer():
         critic_scheduler.step()
 
         # actor update on critic-guided actor loss (+ optional BC)
+        loss_bc, loss_actor = self._actor_bc_losses(batch)
         actor_total = (self.actor_loss_weight       * loss_actor +
                        self.point_match_loss_weight * loss_bc)
         actor_optim.zero_grad(set_to_none=True)
@@ -291,18 +350,18 @@ class CoLMotionPolicyTrainer():
             "total_loss": float(total.detach().item()),
             "point_match_loss": float(loss_bc.detach().item()),
             "one_step_Q_loss": float(loss_q1.detach().item()),
-            "agent_loss": float(loss_actor.detach().item()),
+            "actor_loss": float(loss_actor.detach().item()),
         }
 
-        metrics["lr_actor"]  = float(actor_optim.param_groups[0]["lr"])
-        metrics["lr_critic"] = float(critic_optim.param_groups[0]["lr"])
+        # metrics["lr_actor"]  = float(actor_optim.param_groups[0]["lr"])
+        # metrics["lr_critic"] = float(critic_optim.param_groups[0]["lr"])
 
         return metrics
 
     @torch.no_grad()
-    def agent_rollout(self, batch: dict[str, torch.Tensor]) -> Dict[str, float]:
+    def actor_rollout(self, batch: dict[str, torch.Tensor]) -> Dict[str, float]:
         """
-        Run a batch of agent rollouts to collect transitions for the replay 
+        Run a batch of actor rollouts to collect transitions for the replay 
         buffer. 
         Performs a batched rollout with self.rollout_length steps. Reaching the 
         goal (within 1cm and 15 degrees) or colliding with obstacles marks the 
@@ -442,6 +501,36 @@ class CoLMotionPolicyTrainer():
 
     # ---------- Validation ----------
 
+    def reset_state_val_metrics(self):
+        self.val_point_match_loss.reset()
+        self.val_collision_loss.reset()
+        self.val_loss.reset()
+
+    def compute_state_val_metrics(self) -> Dict[str, float]:
+        return {
+            "val_point_match_loss": float(self.val_point_match_loss.compute().item()),
+            "val_collision_loss":   float(self.val_collision_loss.compute().item()),
+            "val_loss":             float(self.val_loss.compute().item()),
+        }
+
+    def reset_rollout_val_metrics(self):
+        self.val_position_error.reset()
+        self.val_orientation_error.reset()
+        self.val_collision_rate.reset()
+        self.val_funnel_collision_rate.reset()
+        self.val_reaching_success_rate.reset()
+        self.val_success_rate.reset()
+
+    def compute_rollout_val_metrics(self) -> Dict[str, float]:
+        return {
+            "val_position_error":        float(self.val_position_error.compute().item()),
+            "val_orientation_error":     float(self.val_orientation_error.compute().item()),
+            "val_collision_rate":        float(self.val_collision_rate.compute().item()),
+            "val_funnel_collision_rate": float(self.val_funnel_collision_rate.compute().item()),
+            "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
+            "val_success_rate":          float(self.val_success_rate.compute().item()),
+        }
+
     def rollout(
         self,
         batch: dict[str, torch.Tensor],
@@ -563,94 +652,94 @@ class CoLMotionPolicyTrainer():
             has_collision = torch.logical_or(radius_collisions, has_collision)
         return has_collision
 
-    @torch.no_grad()
-    def validate_state_epoch(
-        self,
-        val_state_loader: DataLoader,
-        fabric: Fabric,
-        max_batches: int | None = None,
-    ) -> Dict[str, float]:
-        """
-        Fast validation: single-step BC on the state-val dataloader.
-        Returns aggregated scalars.
+    # @torch.no_grad()
+    # def validate_state_epoch(
+    #     self,
+    #     val_state_loader: DataLoader,
+    #     fabric: Fabric,
+    #     max_batches: int | None = None,
+    # ) -> Dict[str, float]:
+    #     """
+    #     Fast validation: single-step BC on the state-val dataloader.
+    #     Returns aggregated scalars.
 
-        NOTE: The val_state_loader must hold a dataset of type StateDataset 
-        (i.e. DatasetType.VAL_STATE).
-        """
-        self.actor.eval()
-        self.critic.eval()
+    #     NOTE: The val_state_loader must hold a dataset of type StateRewardDataset 
+    #     (i.e. DatasetType.VAL_STATE).
+    #     """
+    #     self.actor.eval()
+    #     self.critic.eval()
 
-        # clear running meters
-        self.val_point_match_loss.reset()
-        self.val_collision_loss.reset()
-        self.val_loss.reset()
+    #     # clear running meters
+    #     self.val_point_match_loss.reset()
+    #     self.val_collision_loss.reset()
+    #     self.val_loss.reset()
 
-        n = len(val_state_loader) if max_batches is None else min(max_batches, len(val_state_loader))
-        it = 0
-        for batch in val_state_loader:
-            batch = self.move_batch_to_device(batch, fabric.device)
-            self._state_validation_step(batch)  # updates torchmetrics
-            it += 1
-            if it >= n:
-                break
+    #     n = len(val_state_loader) if max_batches is None else min(max_batches, len(val_state_loader))
+    #     it = 0
+    #     for batch in val_state_loader:
+    #         batch = self.move_batch_to_device(batch, fabric.device)
+    #         self.state_validation_step(batch)  # updates torchmetrics
+    #         it += 1
+    #         if it >= n:
+    #             break
 
-        out = {
-            "val_point_match_loss": float(self.val_point_match_loss.compute().item()),
-            "val_collision_loss":   float(self.val_collision_loss.compute().item()),
-            "val_loss":             float(self.val_loss.compute().item()),
-        }
-        # leave models in train mode for caller
-        self.actor.train()
-        self.critic.train()
-        return out
+    #     out = {
+    #         "val_point_match_loss": float(self.val_point_match_loss.compute().item()),
+    #         "val_collision_loss":   float(self.val_collision_loss.compute().item()),
+    #         "val_loss":             float(self.val_loss.compute().item()),
+    #     }
+    #     # leave models in train mode for caller
+    #     self.actor.train()
+    #     self.critic.train()
+    #     return out
 
-    @torch.no_grad()
-    def validate_rollout_epoch(
-        self,
-        val_trajectory_loader: DataLoader,
-        fabric: Fabric,
-        max_batches: int | None = None,
-    ) -> Dict[str, float]:
-        """
-        Rollout validation: evaluate multi-step metrics on the trajectory-val loader.
-        Updates & returns success/collision stats.
+    # @torch.no_grad()
+    # def validate_rollout_epoch(
+    #     self,
+    #     val_trajectory_loader: DataLoader,
+    #     fabric: Fabric,
+    #     max_batches: int | None = None,
+    # ) -> Dict[str, float]:
+    #     """
+    #     Rollout validation: evaluate multi-step metrics on the trajectory-val loader.
+    #     Updates & returns success/collision stats.
 
-        NOTE: The val_trajectory_loader must hold a dataset of type TrajectoryDataset 
-        (i.e. DatasetType.VAL).
-        """
-        self.actor.eval()
-        self.critic.eval()
+    #     NOTE: The val_trajectory_loader must hold a dataset of type TrajectoryDataset 
+    #     (i.e. DatasetType.VAL).
+    #     """
+    #     self.actor.eval()
+    #     self.critic.eval()
 
-        # reset all rollout meters
-        self.val_position_error.reset()
-        self.val_orientation_error.reset()
-        self.val_collision_rate.reset()
-        self.val_funnel_collision_rate.reset()
-        self.val_reaching_success_rate.reset()
-        self.val_success_rate.reset()
+    #     # reset all rollout meters
+    #     self.val_position_error.reset()
+    #     self.val_orientation_error.reset()
+    #     self.val_collision_rate.reset()
+    #     self.val_funnel_collision_rate.reset()
+    #     self.val_reaching_success_rate.reset()
+    #     self.val_success_rate.reset()
 
-        n = len(val_trajectory_loader) if max_batches is None else min(max_batches, len(val_trajectory_loader))
-        it = 0
-        for batch in val_trajectory_loader:
-            batch = self.move_batch_to_device(batch, fabric.device)
-            self._trajectory_validation_step(batch)
-            it += 1
-            if it >= n:
-                break
+    #     n = len(val_trajectory_loader) if max_batches is None else min(max_batches, len(val_trajectory_loader))
+    #     it = 0
+    #     for batch in val_trajectory_loader:
+    #         batch = self.move_batch_to_device(batch, fabric.device)
+    #         self.trajectory_validation_step(batch)
+    #         it += 1
+    #         if it >= n:
+    #             break
 
-        out = {
-            "val_position_error":        float(self.val_position_error.compute().item()),
-            "val_orientation_error":     float(self.val_orientation_error.compute().item()),
-            "val_collision_rate":        float(self.val_collision_rate.compute().item()),
-            "val_funnel_collision_rate": float(self.val_funnel_collision_rate.compute().item()),
-            "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
-            "val_success_rate":          float(self.val_success_rate.compute().item()),
-        }
-        self.actor.train()
-        self.critic.train()
-        return out
+    #     out = {
+    #         "val_position_error":        float(self.val_position_error.compute().item()),
+    #         "val_orientation_error":     float(self.val_orientation_error.compute().item()),
+    #         "val_collision_rate":        float(self.val_collision_rate.compute().item()),
+    #         "val_funnel_collision_rate": float(self.val_funnel_collision_rate.compute().item()),
+    #         "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
+    #         "val_success_rate":          float(self.val_success_rate.compute().item()),
+    #     }
+    #     self.actor.train()
+    #     self.critic.train()
+    #     return out
 
-    def _state_validation_step(self, batch: dict[str, torch.Tensor]):
+    def state_validation_step(self, batch: dict[str, torch.Tensor]):
         """
         Validation (state-based): compute single-step BC loss only (fast & stable).
         """
@@ -658,6 +747,7 @@ class CoLMotionPolicyTrainer():
         pc        = batch["point_cloud"]
         q         = batch["configuration"]
         q_next     = batch["next_configuration"]
+        is_expert  = batch["is_expert"]
 
         with torch.no_grad():
             qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
@@ -667,7 +757,7 @@ class CoLMotionPolicyTrainer():
             q_pred_unn = self.robot.unnormalize_joints(q_pred)
             q_next_unn = self.robot.unnormalize_joints(q_next)
             loss_bc    = self.loss_fun.bc_pointcloud_loss(
-                pred_q_unnorm=q_pred_unn, expert_q_unnorm=q_next_unn, reduction="mean")
+                pred_q_unnorm=q_pred_unn, expert_q_unnorm=q_next_unn, is_expert=is_expert)
             l_collision = self.loss_fun.collision_loss(
                 unnormalized_q=q_next_unn,
                 cuboid_centers=batch["cuboid_centers"],
@@ -688,9 +778,10 @@ class CoLMotionPolicyTrainer():
         self, batch: dict[str, torch.Tensor], rollouts: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Ends the rollouts at the target position and orientation, padding the rest of each successful
-        trajectory with the last successful configuration. Also returns the length up until success
-        and a mask indicating which rollouts have successful configurations.
+        Ends the rollouts at the target position and orientation, padding the
+        rest of each successful trajectory with the last successful
+        configuration. Also returns the length up until success and a mask
+        indicating which rollouts have successful configurations.
         """
         B = rollouts.size(0)
         assert self.fk_sampler is not None
@@ -743,7 +834,7 @@ class CoLMotionPolicyTrainer():
         rollouts[selection_mask] = final_values[selection_mask]
         return rollouts, lengths, has_reaching_success
 
-    def _trajectory_validation_step(
+    def trajectory_validation_step(
         self, batch: dict[str, torch.Tensor]
     ) -> None:
         """
