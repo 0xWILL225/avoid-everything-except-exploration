@@ -112,8 +112,8 @@ def run():
     fabric.launch()
 
     dm = DataModule(
-        train_batch_size=10 if config["mintest"] else config["train_batch_size"],
-        val_batch_size=10 if config["mintest"] else config["val_batch_size"],
+        train_batch_size=8 if config["mintest"] else config["train_batch_size"],
+        val_batch_size=8 if config["mintest"] else config["val_batch_size"],
         num_workers=(
             0 if config["mintest"] else config["num_workers"]
         ),
@@ -200,16 +200,16 @@ def run():
                 critic_scheduler=critic_sch
             )
             if global_step % config["collect_rollouts_every_n_steps"] == 0:
-                trainer.agent_rollout(batch)
+                metrics.update(trainer.agent_rollout(batch))
             global_step += 1
 
             if logger and (global_step % config["log_every_n_steps"] == 0):
-                logger.log_metrics(metrics | {"step": global_step}, step=global_step)
+                logger.log_metrics({f"train/{k}": v for k, v in metrics.items()}, step=global_step)
 
             # increment with the number of batches consumed from the expert loader
             batch_idx += data_loader_iterations
             if show_bar:
-                epoch_bar.set_postfix(loss=float(metrics["loss"]), batch=f"{batch_idx}/{n_batches}")
+                epoch_bar.set_postfix(loss=float(metrics["total_loss"]), batch=f"{batch_idx}/{n_batches}")
                 epoch_bar.update(data_loader_iterations)
 
             if logger and (global_step % config["validate_every_n_steps"] == 0):
@@ -220,7 +220,7 @@ def run():
                 val_metrics.update(trainer.validate_rollout_epoch(
                     val_trajectory_loader, fabric, max_batches=max_val_batches))
                 if logger:
-                    logger.log_metrics(val_metrics, step=global_step)
+                    logger.log_metrics({f"val/{k}": v for k, v in val_metrics.items()}, step=global_step)
 
             # periodic checkpointing based on wall time
             if config["checkpoint_interval"] > 0 and (time.time() - last_ckpt_time) / 60.0 >= config["checkpoint_interval"]:
@@ -244,7 +244,7 @@ def run():
         val_metrics.update(trainer.validate_rollout_epoch(
             val_trajectory_loader, fabric, max_batches=max_val_batches))
         if logger:
-            logger.log_metrics(val_metrics, step=global_step)
+            logger.log_metrics({f"val/{k}": v for k, v in val_metrics.items()}, step=global_step)
 
     cprint("Finished Fabric training run.", "green")
 

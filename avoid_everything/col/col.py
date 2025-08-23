@@ -222,26 +222,26 @@ class CoLMotionPolicyTrainer():
 
         # BC loss in point-cloud space
         assert self.robot is not None
-        l_bc = self.loss_fun.bc_pointcloud_loss(
+        q_next_unn = self.robot.unnormalize_joints(q_next)
+        loss_bc = self.loss_fun.bc_pointcloud_loss(
             pred_q_unnorm=self.robot.unnormalize_joints(q_pred),
-            target_q_unnorm=self.robot.unnormalize_joints(q_next),
+            expert_q_unnorm=q_next_unn,
             reduction="mean",
         )
 
         # RL losses (critic TD target + actor Q-loss)
-        assert self.robot is not None
-        samples = self._sample(self.robot.unnormalize_joints(q_next))[..., :3]
+        robot_pc = self._sample(q_next_unn)[..., :3]
         next_point_cloud = batch["point_cloud"].clone()
-        next_point_cloud[:, : samples.size(1)] = samples
+        next_point_cloud[:, : robot_pc.size(1)] = robot_pc
 
-        l_q1, l_actor = self.loss_fun.q1_and_actor_losses(
+        loss_q1, loss_actor = self.loss_fun.q1_and_actor_losses(
             actor=self.actor, critic=self.critic,
             target_actor=self.target_actor, target_critic=self.target_critic,
             batch=batch, next_point_cloud=next_point_cloud,
             pc_bounds=self.pc_bounds, gamma=self.gamma, huber_delta=None
         )
 
-        return l_bc, l_q1, l_actor
+        return loss_bc, loss_q1, loss_actor
 
     def train_step(
         self,
@@ -254,24 +254,27 @@ class CoLMotionPolicyTrainer():
     ) -> Dict[str, float]:
         """
         One training iteration on a mixed (expert + agent) batch.
-        Computes L_BC, L_Q1, L_A via self.state_based_step(), takes:
+        Calculates losses and performs optimization.
+
+        Computes L_BC, L_Q1, L_A via self._state_based_step(), then:
         1) critic step on L_Q1
         2) actor step on (λ_A * L_A + λ_BC * L_BC)
         3) Polyak soft-update of targets
+
         Returns a flat dict of scalars for logging.
         """
-        l_bc, l_q1, l_actor = self._state_based_step(batch)
+        loss_bc, loss_q1, loss_actor = self._state_based_step(batch)
 
         # critic update on one-step TD loss
         critic_optim.zero_grad(set_to_none=True)
-        fabric.backward(l_q1)
+        fabric.backward(loss_q1)
         clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
         critic_optim.step()
         critic_scheduler.step()
 
-        # actor update on Q-guided loss (+ optional BC)
-        actor_total = (self.actor_loss_weight       * l_actor +
-                       self.point_match_loss_weight * l_bc)
+        # actor update on critic-guided actor loss (+ optional BC)
+        actor_total = (self.actor_loss_weight       * loss_actor +
+                       self.point_match_loss_weight * loss_bc)
         actor_optim.zero_grad(set_to_none=True)
         fabric.backward(actor_total)
         clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
@@ -280,15 +283,15 @@ class CoLMotionPolicyTrainer():
 
         self._polyak_update(tau=self.tau) # target soft update
 
-        total = (self.point_match_loss_weight * l_bc
-                 + self.actor_loss_weight     * l_actor
-                 + l_q1)
+        total = (self.point_match_loss_weight * loss_bc
+                 + self.actor_loss_weight     * loss_actor
+                 + loss_q1)
 
         metrics = {
             "total_loss": float(total.detach().item()),
-            "point_match_loss": float(l_bc.detach().item()),
-            "one_step_Q_loss": float(l_q1.detach().item()),
-            "agent_loss": float(l_actor.detach().item()),
+            "point_match_loss": float(loss_bc.detach().item()),
+            "one_step_Q_loss": float(loss_q1.detach().item()),
+            "agent_loss": float(loss_actor.detach().item()),
         }
 
         metrics["lr_actor"]  = float(actor_optim.param_groups[0]["lr"])
@@ -297,18 +300,24 @@ class CoLMotionPolicyTrainer():
         return metrics
 
     @torch.no_grad()
-    def agent_rollout(self, batch: dict[str, torch.Tensor]) -> None:
+    def agent_rollout(self, batch: dict[str, torch.Tensor]) -> Dict[str, float]:
         """
         Run a batch of agent rollouts to collect transitions for the replay 
         buffer. 
         Performs a batched rollout with self.rollout_length steps. Reaching the 
         goal (within 1cm and 15 degrees) or colliding with obstacles marks the 
         end of the episode for each rollout in the batch.
+
+        Returns a metrics dict including average episode reward across the batch.
         """
         # use idx from dataset batch so the replay can fetch scenes later
         idx = batch["idx"]                     # [B]
         q = batch["configuration"].clone()     # [B, DOF], normalized
         B = q.size(0)
+
+        # track cumulative rewards per episode (per batch element)
+        cumulative_rewards = torch.zeros(B, device=q.device)
+        transitions_collected: int = 0
 
         cuboids = TorchCuboids(batch["cuboid_centers"], batch["cuboid_dims"], batch["cuboid_quats"])
         cylinders = TorchCylinders(batch["cylinder_centers"], batch["cylinder_radii"],
@@ -320,7 +329,7 @@ class CoLMotionPolicyTrainer():
 
         active = torch.ones(B, dtype=torch.bool, device=q.device)
         assert self.robot is not None
-        for t in range(self.rollout_length):
+        for _ in range(self.rollout_length):
             if not active.any(): break
 
             # actor action for active rows
@@ -353,6 +362,10 @@ class CoLMotionPolicyTrainer():
                 done=done.unsqueeze(1).cpu().numpy().astype(np.uint8),
             )
 
+            # accumulate rewards for active episodes
+            cumulative_rewards[active] += r_t.squeeze(1)
+            transitions_collected += int(active.sum().item())
+
             # update only those still active
             still = ~done
             if still.any():
@@ -367,6 +380,13 @@ class CoLMotionPolicyTrainer():
             # mark finished rows inactive
             tmp = active.nonzero(as_tuple=False).squeeze(1)
             active[tmp] = still
+
+        # average reward per episode across batch
+        avg_episode_reward = float(cumulative_rewards.mean().item())
+        return {
+            "avg_episode_reward": avg_episode_reward, 
+            "transitions_collected": transitions_collected,
+        }
 
     def _check_reaching_success(
         self,
@@ -562,6 +582,7 @@ class CoLMotionPolicyTrainer():
 
         # clear running meters
         self.val_point_match_loss.reset()
+        self.val_collision_loss.reset()
         self.val_loss.reset()
 
         n = len(val_state_loader) if max_batches is None else min(max_batches, len(val_state_loader))
@@ -575,6 +596,7 @@ class CoLMotionPolicyTrainer():
 
         out = {
             "val_point_match_loss": float(self.val_point_match_loss.compute().item()),
+            "val_collision_loss":   float(self.val_collision_loss.compute().item()),
             "val_loss":             float(self.val_loss.compute().item()),
         }
         # leave models in train mode for caller
@@ -644,8 +666,8 @@ class CoLMotionPolicyTrainer():
             assert self.robot is not None
             q_pred_unn = self.robot.unnormalize_joints(q_pred)
             q_next_unn = self.robot.unnormalize_joints(q_next)
-            l_bc    = self.loss_fun.bc_pointcloud_loss(
-                pred_q_unnorm=q_pred_unn, target_q_unnorm=q_next_unn, reduction="mean")
+            loss_bc    = self.loss_fun.bc_pointcloud_loss(
+                pred_q_unnorm=q_pred_unn, expert_q_unnorm=q_next_unn, reduction="mean")
             l_collision = self.loss_fun.collision_loss(
                 unnormalized_q=q_next_unn,
                 cuboid_centers=batch["cuboid_centers"],
@@ -657,9 +679,9 @@ class CoLMotionPolicyTrainer():
                 cylinder_quaternions=batch["cylinder_quats"],
             )
 
-        self.val_point_match_loss.update(l_bc)
+        self.val_point_match_loss.update(loss_bc)
         self.val_collision_loss.update(l_collision)
-        val_loss = self.point_match_loss_weight * l_bc + self.collision_loss_weight * l_collision
+        val_loss = self.point_match_loss_weight * loss_bc + self.collision_loss_weight * l_collision
         self.val_loss.update(val_loss)
 
     def _end_rollouts_at_target(

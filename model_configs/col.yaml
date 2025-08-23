@@ -65,8 +65,8 @@ train_batch_size: 12                 # batch size for training
 val_batch_size: 12                   # batch size for validation
 expert_fraction: 0.25                # fraction of samples to sample from expert loader during fine-tuning
 max_epochs: 100                      # maximum number of epochs to train for
-mintest: false                       # true: run minimal test run for debugging
-logging: true                        # true: log to wandb
+mintest: true                       # true: run minimal test run for debugging
+logging: false                        # true: log to wandb
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Cretin: Avoid Everything Except Exploration"
 description: "Testing CoL training"
