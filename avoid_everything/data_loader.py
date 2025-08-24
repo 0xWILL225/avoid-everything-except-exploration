@@ -65,6 +65,7 @@ class Base(Dataset):
         goal_reward: Optional[float] = None,
         collision_reward: Optional[float] = None,
         step_reward: Optional[float] = None,
+        reward_scale: Optional[float] = None,
     ):
         """
         :param robot (Robot): Robot object
@@ -102,9 +103,10 @@ class Base(Dataset):
             use_cache=True,
             with_base_link=True,
         )
-        self.goal_reward = goal_reward if goal_reward is not None else 0.0
-        self.collision_reward = collision_reward if collision_reward is not None else 0.0
-        self.step_reward = step_reward if step_reward is not None else 0.0
+        self.reward_scale = reward_scale if reward_scale is not None else 1.0
+        self.goal_reward = goal_reward * self.reward_scale if goal_reward is not None else 0.0
+        self.collision_reward = collision_reward * self.reward_scale if collision_reward is not None else 0.0
+        self.step_reward = step_reward * self.reward_scale if step_reward is not None else 0.0
 
     @lru_cache(maxsize=4096)
     def scene_by_idx(self, idx: int) -> dict[str, torch.Tensor]:
@@ -511,6 +513,7 @@ class StateRewardDataset(Base):
         goal_reward: float,
         collision_reward: float,
         step_reward: float,
+        reward_scale: float,
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -535,6 +538,7 @@ class StateRewardDataset(Base):
             goal_reward,
             collision_reward,
             step_reward,
+            reward_scale,
         )
 
     @classmethod
@@ -856,6 +860,7 @@ class DataModule:
             self.train_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
+            shuffle=True,
             persistent_workers=False if self.num_workers == 0 else True,
         )
 
@@ -870,6 +875,7 @@ class DataModule:
             self.val_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
+            shuffle=True,
             persistent_workers=False if self.num_workers == 0 else True,
         )
 

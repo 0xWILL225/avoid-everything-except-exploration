@@ -28,20 +28,25 @@ training_model_parameters:
   actor_loss_weight: 1.0        # RL actor loss weight
   min_lr: 1.0e-5
   max_lr: 5.0e-5
-  warmup_steps: 5000    # number of steps to warm up the learning rate linearly from min_lr to max_lr
-  weight_decay: 1.0e-4  # weight decay for AdamW optimizers
-  gamma: 0.99           # discount factor for Q-learning
-  tau: 0.005            # target network's soft update rate
-  grad_clip_norm: 1.0   # gradient clipping norm
+  warmup_steps: 5000       # number of steps to warm up the learning rate linearly from min_lr to max_lr
+  weight_decay: 1.0e-4     # weight decay for AdamW optimizers
+  gamma: 0.99              # discount factor for Q-learning
+  exploration_noise: 0.1 # exploration noise for actor [std deviation]
+  target_actor_noise: 0.2 # target actor noise for actor [std deviation] [TD3]
+  target_actor_noise_clip: 0.5 # target actor noise clip for actor [TD3]
+  use_huber_loss: true     # use Huber loss for critic loss instead of MSE loss
+  tau: 0.005               # target network's soft update rate
+  grad_clip_norm: 1.0      # gradient clipping norm
+  rollout_length: 69       # number of steps to rollout for the actor
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]  # bounds for the point clouds
-  rollout_length: 69    # number of steps to rollout for the actor
+  
 
 data_module_parameters:
   data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
-  random_scale: 0.015
+  random_scale: 0.015 # std deviation of the noise added to the expert configurations
   num_target_points: 128
   include_reward: true
 
@@ -49,13 +54,14 @@ shared_parameters:
   urdf_path: /workspace/assets/panda/panda_spheres.urdf
   num_robot_points: 2048
   # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
-  goal_reward: 100.0      # reward for reaching the goal
-  collision_reward: -10.0 # reward for colliding with an obstacle
-  step_reward: -1.0       # reward for each step that doesn't terminate the episode
+  goal_reward: 1.0        # reward for reaching the goal
+  collision_reward: -0.1  # reward for colliding with an obstacle
+  step_reward: -0.01      # reward for each step that doesn't terminate the episode
+  reward_scale: 1.0       # proportional scaling that applies to all rewards
 
 num_workers: 6                       # number of CPU workers for the data loaders
 checkpoint_interval: 30              # how often to save model checkpoints [minutes]
-pretraining_steps: 10000             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
+pretraining_steps: 20000             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
 validate_every_n_steps: 1000         # how often to run mid-epoch validation epochs [global steps]
 collect_rollouts_every_n_steps: 1000 # how often to collect actor rollouts for the replay buffer [global steps]
 log_every_n_steps: 100               # how often to log metrics to wandb [global steps]
@@ -65,9 +71,11 @@ train_batch_size: 12                 # batch size for training
 val_batch_size: 12                   # batch size for validation
 mid_epoch_max_val_batches: 100       # maximum number of batches to validate on during mid-epoch validation
 mid_epoch_max_val_rollouts: 20       # maximum number of rollouts to validate on during mid-epoch validation
-end_epoch_max_val_batches: 100       # maximum number of batches to validate on at end-of-epoch validation
-end_epoch_max_val_rollouts: 20       # maximum number of rollouts to validate on at end-of-epoch validation
+end_epoch_max_val_batches: 200       # maximum number of batches to validate on at end-of-epoch validation
+end_epoch_max_val_rollouts: 40       # maximum number of rollouts to validate on at end-of-epoch validation
 expert_fraction: 0.25                # fraction of samples to sample from expert loader during fine-tuning
+actor_delay: 2                       # delay for actor network's and target network's updates [TD3]
+start_actor_learning: 5000           # number of steps to wait before actor loss activates
 max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb

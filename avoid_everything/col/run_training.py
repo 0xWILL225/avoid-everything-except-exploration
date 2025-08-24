@@ -163,16 +163,19 @@ def run():
     opt_cfg = trainer.configure_optimizers()
     actor_optim  = opt_cfg["actor_optim"]
     critic_optim = opt_cfg["critic_optim"]
+    critic2_optim = opt_cfg["critic2_optim"]
     actor_sch    = opt_cfg["actor_scheduler"]
     critic_sch   = opt_cfg["critic_scheduler"]
+    critic2_sch  = opt_cfg["critic2_scheduler"]
 
     # fabric setup: wrap trainable modules w/ their optimizers
     trainer.actor,  actor_optim  = fabric.setup(trainer.actor,  actor_optim)
     trainer.critic, critic_optim = fabric.setup(trainer.critic, critic_optim)
-
+    trainer.critic2, critic2_optim = fabric.setup(trainer.critic2, critic2_optim)
     # target networks have no optimizers
     trainer.target_actor  = fabric.setup(trainer.target_actor)
     trainer.target_critic = fabric.setup(trainer.target_critic)
+    trainer.target_critic2 = fabric.setup(trainer.target_critic2)
 
     # now that actor/critic are on the right device, initialize trainer
     trainer.setup()
@@ -183,6 +186,8 @@ def run():
         "critic": trainer.critic,
         "target_actor": trainer.target_actor,
         "target_critic": trainer.target_critic,
+        "critic2": trainer.critic2,
+        "target_critic2": trainer.target_critic2,
     }.items():
         tot, tr = count_params(module)
         print(f"    {name:14s}  total={pretty_k(tot):>7}  trainable={pretty_k(tr):>7}")
@@ -197,6 +202,7 @@ def run():
     def run_val_epoch_with_bar(loader, step_fn, *, desc: str, device, max_batches=None):
         trainer.actor.eval()
         trainer.critic.eval()
+        trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
         val_bar = tqdm(total=total, desc=desc, unit="batch", leave=False, dynamic_ncols=True)
         it = 0
@@ -211,6 +217,7 @@ def run():
         val_bar.close()
         trainer.actor.train()
         trainer.critic.train()
+        trainer.critic2.train()
 
     def run_state_val_epoch(val_state_loader, fabric, max_val_batches=None):
         trainer.reset_state_val_metrics()
@@ -260,13 +267,18 @@ def run():
             )
             batch = trainer.move_batch_to_device(mixed, fabric.device)
 
+
+            update_actor_and_targets: bool = global_step % config["actor_delay"] == 0
             metrics = trainer.train_step(
                 batch,
                 fabric=fabric,
                 actor_optim=actor_optim,
                 critic_optim=critic_optim,
+                critic2_optim=critic2_optim,
                 actor_scheduler=actor_sch,
-                critic_scheduler=critic_sch
+                critic_scheduler=critic_sch,
+                critic2_scheduler=critic2_sch,
+                update_actor_and_targets=update_actor_and_targets
             )
             if global_step % config["collect_rollouts_every_n_steps"] == 0:
                 actor_rollout_metrics = trainer.actor_rollout(batch)
@@ -281,7 +293,7 @@ def run():
             prev = batch_idx
             batch_idx = min(n_batches, batch_idx + data_loader_iterations)
             if show_bar:
-                epoch_bar.set_postfix(loss=float(metrics["total_loss"]), batch=f"{batch_idx}/{n_batches}", ordered_dict={"pretraining": pretraining})
+                epoch_bar.set_postfix(loss=float(metrics["actor_loss"]), batch=f"{batch_idx}/{n_batches}", ordered_dict={"pretraining": pretraining})
                 epoch_bar.update(batch_idx - prev)
             if batch_idx >= n_batches:
                 break
@@ -304,10 +316,16 @@ def run():
                 fabric.save(str(ckpt_path), {
                     "actor": trainer.actor.state_dict(), 
                     "critic": trainer.critic.state_dict(), 
+                    "critic2": trainer.critic2.state_dict(),
+                    "target_actor": trainer.target_actor.state_dict(),
+                    "target_critic": trainer.target_critic.state_dict(),
+                    "target_critic2": trainer.target_critic2.state_dict(),
                     "actor_optim": actor_optim.state_dict(), 
                     "critic_optim": critic_optim.state_dict(),
+                    "critic2_optim": critic2_optim.state_dict(),
                     "actor_sch": actor_sch.state_dict(),
-                    "critic_sch": critic_sch.state_dict()
+                    "critic_sch": critic_sch.state_dict(),
+                    "critic2_sch": critic2_sch.state_dict()
                 },)
                 cprint(f"Saved checkpoint to {ckpt_path}", "green")
                 last_ckpt_time = time.time()
@@ -315,8 +333,10 @@ def run():
         # end of epoch validation
         if show_bar:
             cprint(f"\nEnd of epoch {epoch+1} validation", "blue")
-        val_metrics = run_state_val_epoch(val_state_loader, fabric, max_val_batches=config["end_epoch_max_val_batches"])
-        val_metrics.update(run_rollout_val_epoch(val_trajectory_loader, fabric, max_val_batches=config["end_epoch_max_val_rollouts"]))
+        val_metrics = run_state_val_epoch(
+            val_state_loader, fabric, max_val_batches=config["end_epoch_max_val_batches"])
+        val_metrics.update(run_rollout_val_epoch(
+            val_trajectory_loader, fabric, max_val_batches=config["end_epoch_max_val_rollouts"]))
         if logger:
             logger.log_metrics({f"val/{k}": v for k, v in val_metrics.items()}, step=global_step)
 

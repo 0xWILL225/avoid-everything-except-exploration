@@ -38,6 +38,7 @@ class CoLMotionPolicyTrainer():
         collision_reward: float,
         goal_reward: float,
         step_reward: float,
+        reward_scale: float,
         robot_dof: int,
         point_match_loss_weight: float,
         collision_loss_weight: float,
@@ -48,6 +49,10 @@ class CoLMotionPolicyTrainer():
         warmup_steps: int,
         weight_decay: float,
         gamma: float,
+        exploration_noise: float,
+        target_actor_noise: float,
+        target_actor_noise_clip: float,
+        use_huber_loss: bool,
         tau: float,
         grad_clip_norm: float,
         pc_bounds: list[list[float]],
@@ -70,10 +75,15 @@ class CoLMotionPolicyTrainer():
         self.pc_bounds = torch.as_tensor(pc_bounds)
         self.rollout_length = rollout_length
         self.robot_dof = robot_dof
-        self.collision_reward = collision_reward
-        self.goal_reward = goal_reward
-        self.step_reward = step_reward
+        self.reward_scale = reward_scale
+        self.collision_reward = collision_reward * reward_scale
+        self.goal_reward = goal_reward * reward_scale
+        self.step_reward = step_reward * reward_scale
         self.gamma = gamma
+        self.exploration_noise = exploration_noise
+        self.target_actor_noise = target_actor_noise
+        self.target_actor_noise_clip = target_actor_noise_clip
+        self.use_huber_loss = use_huber_loss
         self.tau = tau
         self.grad_clip_norm = grad_clip_norm
 
@@ -91,15 +101,23 @@ class CoLMotionPolicyTrainer():
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
-        self.critic = CriticMPiFormer(
-            num_robot_points=num_robot_points,
-            robot_dof=robot_dof,
-        )
         self.target_actor = MotionPolicyTransformer(
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
+        self.critic = CriticMPiFormer(
+            num_robot_points=num_robot_points,
+            robot_dof=robot_dof,
+        )
         self.target_critic = CriticMPiFormer(
+            num_robot_points=num_robot_points,
+            robot_dof=robot_dof,
+        )
+        self.critic2 = CriticMPiFormer(
+            num_robot_points=num_robot_points,
+            robot_dof=robot_dof,
+        )
+        self.target_critic2 = CriticMPiFormer(
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
@@ -114,6 +132,8 @@ class CoLMotionPolicyTrainer():
             self.actor.parameters(),  lr=self.min_lr,  weight_decay=self.weight_decay, betas=betas)
         critic_optim = torch.optim.AdamW(
             self.critic.parameters(), lr=self.min_lr, weight_decay=self.weight_decay, betas=betas)
+        critic2_optim = torch.optim.AdamW(
+            self.critic2.parameters(), lr=self.min_lr, weight_decay=self.weight_decay, betas=betas)
 
         def lr_lambda(step):
             lr = self.min_lr + (self.max_lr - self.min_lr) * min(1.0, step / self.warmup_steps)
@@ -121,16 +141,20 @@ class CoLMotionPolicyTrainer():
 
         actor_scheduler  = LambdaLR(actor_optim,  lr_lambda)
         critic_scheduler = LambdaLR(critic_optim, lr_lambda)
+        critic2_scheduler = LambdaLR(critic2_optim, lr_lambda)
 
         # Hard-copy weights into targets once here; call polyak_update() each step.
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
+        self.target_critic2.load_state_dict(self.critic2.state_dict())
 
         return {
             "actor_optim": actor_optim,
             "critic_optim": critic_optim,
+            "critic2_optim": critic2_optim,
             "actor_scheduler": actor_scheduler,
             "critic_scheduler": critic_scheduler,
+            "critic2_scheduler": critic2_scheduler,
         }
 
     @torch.no_grad()
@@ -140,6 +164,8 @@ class CoLMotionPolicyTrainer():
             tgt.data.lerp_(src.data, tau)
         for tgt, src in zip(self.target_critic.parameters(), self.critic.parameters()):
             tgt.data.lerp_(src.data, tau)
+        for tgt, src in zip(self.target_critic2.parameters(), self.critic2.parameters()):
+            tgt.data.lerp_(src.data, tau)
 
     def _verify_device(self) -> torch.device:
         """
@@ -148,6 +174,8 @@ class CoLMotionPolicyTrainer():
         assert next(self.actor.parameters()).device == next(self.critic.parameters()).device
         assert next(self.actor.parameters()).device == next(self.target_actor.parameters()).device
         assert next(self.actor.parameters()).device == next(self.target_critic.parameters()).device
+        assert next(self.actor.parameters()).device == next(self.critic2.parameters()).device
+        assert next(self.actor.parameters()).device == next(self.target_critic2.parameters()).device
         return next(self.actor.parameters()).device
 
     def setup(self):
@@ -170,10 +198,12 @@ class CoLMotionPolicyTrainer():
         self.pc_bounds = self.pc_bounds.to(self.device)
         self.actor.train()
         self.critic.train()
+        self.critic2.train()
 
         # never need gradients for target networks
         self.target_actor.eval()
         self.target_critic.eval()
+        self.target_critic2.eval()
 
         # move all metrics to the same device
         for m in [self.val_position_error, self.val_orientation_error,
@@ -190,16 +220,6 @@ class CoLMotionPolicyTrainer():
         assert self.device is not None, "You must call setup() before getting the device"
         return self.device
 
-    # def move_batch_to_device(
-    #     self,
-    #     batch: Dict[str, torch.Tensor],
-    #     device: torch.device,
-    # ) -> Dict[str, torch.Tensor]:
-    #     """
-    #     Move a batch of data to the desired device.
-    #     """
-    #     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-
     def move_batch_to_device(
         self, batch: Dict[str, torch.Tensor], device: torch.device, non_blocking: bool=False
     ) -> Dict[str, torch.Tensor]:
@@ -213,7 +233,6 @@ class CoLMotionPolicyTrainer():
             else:
                 out[k] = v
         return out
-
 
     def _sample(self, q: torch.Tensor) -> torch.Tensor:
         """
@@ -255,15 +274,10 @@ class CoLMotionPolicyTrainer():
             is_expert=is_expert,
         )
 
-        # actor loss: -Q(s, π(s))
-        a_pi = self.actor(pc_labels, pc, q, self.pc_bounds)
-        if a_pi.dim() == 3:
-            a_pi = a_pi[:, -1, :]
-
         # don't backprop into critic
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        loss_actor = -self.critic(pc_labels, pc, q, a_pi, self.pc_bounds).mean()
+        loss_actor = -self.critic(pc_labels, pc, q, a_pred, self.pc_bounds).mean()
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return loss_bc, loss_actor
@@ -271,7 +285,7 @@ class CoLMotionPolicyTrainer():
     def _critic_loss(
         self,
         batch: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         One-step TD loss for critic using target networks.
         """
@@ -292,15 +306,27 @@ class CoLMotionPolicyTrainer():
         a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
         if a_next.dim() == 3:
             a_next = a_next[:, -1, :]
+        # add clipped gaussian target actor noise [TD3]
+        a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
+                                      -self.target_actor_noise_clip,
+                                      self.target_actor_noise_clip)
 
         with torch.no_grad():
             q_next_target = self.target_critic(
                 batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
             )
-            y = r + self.gamma * (1.0 - done) * q_next_target
+            q_next_target2 = self.target_critic2(
+                batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
+            )
+            y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
 
         q_sa = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
-        return torch.nn.functional.mse_loss(q_sa, y)
+        q_sa2 = self.critic2(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        if self.use_huber_loss:
+            return torch.nn.functional.huber_loss(q_sa, y, delta=1.0), \
+                   torch.nn.functional.huber_loss(q_sa2, y, delta=1.0)
+        return torch.nn.functional.mse_loss(q_sa, y), \
+               torch.nn.functional.mse_loss(q_sa2, y)
 
     def train_step(
         self,
@@ -308,8 +334,11 @@ class CoLMotionPolicyTrainer():
         fabric,
         actor_optim: torch.optim.Optimizer,
         critic_optim: torch.optim.Optimizer,
+        critic2_optim: torch.optim.Optimizer,
         actor_scheduler,
         critic_scheduler,
+        critic2_scheduler,
+        update_actor_and_targets: bool,
     ) -> Dict[str, float]:
         """
         One training iteration on a mixed (expert + actor) batch.
@@ -323,38 +352,38 @@ class CoLMotionPolicyTrainer():
         Returns a flat dict of scalars for logging.
         """
         # critic update on one-step TD loss first (keeps actor graph clean)
-        loss_q1 = self._critic_loss(batch)
+        loss_q1, loss_q2 = self._critic_loss(batch)
         critic_optim.zero_grad(set_to_none=True)
-        fabric.backward(loss_q1)
+        critic2_optim.zero_grad(set_to_none=True)
+        fabric.backward(loss_q1 + loss_q2)
         clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
+        clip_grad_norm_(self.critic2.parameters(), max_norm=self.grad_clip_norm)
         critic_optim.step()
+        critic2_optim.step()
         critic_scheduler.step()
+        critic2_scheduler.step()
 
-        # actor update on critic-guided actor loss (+ optional BC)
-        loss_bc, loss_actor = self._actor_bc_losses(batch)
-        actor_total = (self.actor_loss_weight       * loss_actor +
-                       self.point_match_loss_weight * loss_bc)
-        actor_optim.zero_grad(set_to_none=True)
-        fabric.backward(actor_total)
-        clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
-        actor_optim.step()
-        actor_scheduler.step()
+        if update_actor_and_targets:
+            # actor update on critic-guided actor loss (+ optional BC)
+            loss_bc, loss_actor = self._actor_bc_losses(batch)
+            actor_total = (self.actor_loss_weight       * loss_actor +
+                           self.point_match_loss_weight * loss_bc)
+            actor_optim.zero_grad(set_to_none=True)
+            fabric.backward(actor_total)
+            clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
+            actor_optim.step()
+            actor_scheduler.step()
 
-        self._polyak_update(tau=self.tau) # target soft update
-
-        total = (self.point_match_loss_weight * loss_bc
-                 + self.actor_loss_weight     * loss_actor
-                 + loss_q1)
+            self._polyak_update(tau=self.tau) # target soft update
 
         metrics = {
-            "total_loss": float(total.detach().item()),
             "point_match_loss": float(loss_bc.detach().item()),
-            "one_step_Q_loss": float(loss_q1.detach().item()),
+            "critic_loss_1": float(loss_q1.detach().item()),
+            "critic_loss_2": float(loss_q2.detach().item()),
             "actor_loss": float(loss_actor.detach().item()),
         }
 
-        # metrics["lr_actor"]  = float(actor_optim.param_groups[0]["lr"])
-        # metrics["lr_critic"] = float(critic_optim.param_groups[0]["lr"])
+        metrics["lr"]  = float(actor_optim.param_groups[0]["lr"])
 
         return metrics
 
@@ -397,6 +426,7 @@ class CoLMotionPolicyTrainer():
             lbl_act = labels[active]
             qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [b, 1, DOF] or [b, DOF]
             a = (qdeltas[:, -1, :] if qdeltas.dim()==3 else qdeltas)
+            a = a + torch.randn_like(a) * self.exploration_noise
 
             q_next = (q_act + a).clamp(-1, 1)
             q_next_unn = self.robot.unnormalize_joints(q_next)
@@ -651,93 +681,6 @@ class CoLMotionPolicyTrainer():
             )
             has_collision = torch.logical_or(radius_collisions, has_collision)
         return has_collision
-
-    # @torch.no_grad()
-    # def validate_state_epoch(
-    #     self,
-    #     val_state_loader: DataLoader,
-    #     fabric: Fabric,
-    #     max_batches: int | None = None,
-    # ) -> Dict[str, float]:
-    #     """
-    #     Fast validation: single-step BC on the state-val dataloader.
-    #     Returns aggregated scalars.
-
-    #     NOTE: The val_state_loader must hold a dataset of type StateRewardDataset 
-    #     (i.e. DatasetType.VAL_STATE).
-    #     """
-    #     self.actor.eval()
-    #     self.critic.eval()
-
-    #     # clear running meters
-    #     self.val_point_match_loss.reset()
-    #     self.val_collision_loss.reset()
-    #     self.val_loss.reset()
-
-    #     n = len(val_state_loader) if max_batches is None else min(max_batches, len(val_state_loader))
-    #     it = 0
-    #     for batch in val_state_loader:
-    #         batch = self.move_batch_to_device(batch, fabric.device)
-    #         self.state_validation_step(batch)  # updates torchmetrics
-    #         it += 1
-    #         if it >= n:
-    #             break
-
-    #     out = {
-    #         "val_point_match_loss": float(self.val_point_match_loss.compute().item()),
-    #         "val_collision_loss":   float(self.val_collision_loss.compute().item()),
-    #         "val_loss":             float(self.val_loss.compute().item()),
-    #     }
-    #     # leave models in train mode for caller
-    #     self.actor.train()
-    #     self.critic.train()
-    #     return out
-
-    # @torch.no_grad()
-    # def validate_rollout_epoch(
-    #     self,
-    #     val_trajectory_loader: DataLoader,
-    #     fabric: Fabric,
-    #     max_batches: int | None = None,
-    # ) -> Dict[str, float]:
-    #     """
-    #     Rollout validation: evaluate multi-step metrics on the trajectory-val loader.
-    #     Updates & returns success/collision stats.
-
-    #     NOTE: The val_trajectory_loader must hold a dataset of type TrajectoryDataset 
-    #     (i.e. DatasetType.VAL).
-    #     """
-    #     self.actor.eval()
-    #     self.critic.eval()
-
-    #     # reset all rollout meters
-    #     self.val_position_error.reset()
-    #     self.val_orientation_error.reset()
-    #     self.val_collision_rate.reset()
-    #     self.val_funnel_collision_rate.reset()
-    #     self.val_reaching_success_rate.reset()
-    #     self.val_success_rate.reset()
-
-    #     n = len(val_trajectory_loader) if max_batches is None else min(max_batches, len(val_trajectory_loader))
-    #     it = 0
-    #     for batch in val_trajectory_loader:
-    #         batch = self.move_batch_to_device(batch, fabric.device)
-    #         self.trajectory_validation_step(batch)
-    #         it += 1
-    #         if it >= n:
-    #             break
-
-    #     out = {
-    #         "val_position_error":        float(self.val_position_error.compute().item()),
-    #         "val_orientation_error":     float(self.val_orientation_error.compute().item()),
-    #         "val_collision_rate":        float(self.val_collision_rate.compute().item()),
-    #         "val_funnel_collision_rate": float(self.val_funnel_collision_rate.compute().item()),
-    #         "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
-    #         "val_success_rate":          float(self.val_success_rate.compute().item()),
-    #     }
-    #     self.actor.train()
-    #     self.critic.train()
-    #     return out
 
     def state_validation_step(self, batch: dict[str, torch.Tensor]):
         """
