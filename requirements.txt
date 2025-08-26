@@ -12,7 +12,7 @@ GitPython==3.1.44
 ikfast-pybind==0.1.2
 geometrout==0.1.3
 torchmetrics==1.7.2
-matplotlib==3.10.3
+# matplotlib==3.10.3
 tqdm==4.67.1
 urchin==0.0.29
 termcolor==3.1.0

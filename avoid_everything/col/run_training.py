@@ -34,7 +34,6 @@ from typing import Any, Dict
 import time
 from contextlib import contextmanager
 
-from sympy.printing.c import none
 from tqdm import tqdm
 from termcolor import cprint
 from lightning.fabric import Fabric
@@ -42,7 +41,6 @@ from lightning.pytorch.loggers import WandbLogger  # Fabric can use PL loggers
 import numpy as np
 import torch
 import torch.autograd
-# from torch.utils.data import DataLoader
 import yaml
 
 from avoid_everything.col.col import CoLMotionPolicyTrainer
@@ -50,6 +48,7 @@ from avoid_everything.data_loader import DataModule
 from avoid_everything.col.mixed_batch_provider import MixedBatchProvider
 from avoid_everything.col.replay import ReplayBuffer
 
+from avoid_everything.loss import CollisionAndBCLossFn
 
 
 # Make deterministic-ish
@@ -160,25 +159,8 @@ def run():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    opt_cfg = trainer.configure_optimizers()
-    actor_optim  = opt_cfg["actor_optim"]
-    critic_optim = opt_cfg["critic_optim"]
-    critic2_optim = opt_cfg["critic2_optim"]
-    actor_sch    = opt_cfg["actor_scheduler"]
-    critic_sch   = opt_cfg["critic_scheduler"]
-    critic2_sch  = opt_cfg["critic2_scheduler"]
-
-    # fabric setup: wrap trainable modules w/ their optimizers
-    trainer.actor,  actor_optim  = fabric.setup(trainer.actor,  actor_optim)
-    trainer.critic, critic_optim = fabric.setup(trainer.critic, critic_optim)
-    trainer.critic2, critic2_optim = fabric.setup(trainer.critic2, critic2_optim)
-    # target networks have no optimizers
-    trainer.target_actor  = fabric.setup(trainer.target_actor)
-    trainer.target_critic = fabric.setup(trainer.target_critic)
-    trainer.target_critic2 = fabric.setup(trainer.target_critic2)
-
-    # now that actor/critic are on the right device, initialize trainer
-    trainer.setup()
+    trainer.configure_optimizers()
+    trainer.setup(fabric)
 
     cprint("Model parameters:", "blue")
     for name, module in {
@@ -258,47 +240,143 @@ def run():
         )
 
         batch_idx = 0
-        for _ in range(n_batches):
+        expert_iter = iter(expert_loader)
+        # for _ in range(n_batches):
+        old_loss_fn = CollisionAndBCLossFn(
+            config["shared_parameters"]["urdf_path"], 
+            config["training_model_parameters"]["collision_loss_margin"]
+        )
+        for batch in expert_loader:
             pretraining: bool = global_step < config["pretraining_steps"]
-            mixed, data_loader_iterations = mixed_provider.sample(
-                8 if config["mintest"] else config["train_batch_size"],
-                expert_fraction=config["expert_fraction"],
-                pretraining=pretraining,
+            # mixed, data_loader_iterations = mixed_provider.sample(
+            #     8 if config["mintest"] else config["train_batch_size"],
+            #     expert_fraction=config["expert_fraction"],
+            #     pretraining=pretraining,
+            # )
+            # batch = trainer.move_batch_to_device(mixed, fabric.device)
+
+            # batch: dict[str, torch.Tensor] = next(expert_iter)
+            batch = trainer.move_batch_to_device(batch, fabric.device, non_blocking=True)
+
+            # point_cloud_labels, point_cloud, q = (
+            #     batch["point_cloud_labels"],
+            #     batch["point_cloud"],
+            #     batch["configuration"],
+            # )
+            # qdeltas = trainer.actor(point_cloud_labels, point_cloud, q, trainer.pc_bounds)
+            # if qdeltas.dim() == 3:
+            #     qdelta = qdeltas[:, -1, :]
+            # else:
+            #     qdelta = qdeltas
+            # q_pred = torch.clamp(q + qdelta, min=-1, max=1)
+            # q_next = batch["next_configuration"]
+            # point_match_loss = trainer._bc_loss(q_pred, q_next)
+
+            point_cloud_labels, point_cloud, q = (
+                batch["point_cloud_labels"],
+                batch["point_cloud"],
+                batch["configuration"],
             )
-            batch = trainer.move_batch_to_device(mixed, fabric.device)
-
-
-            update_actor_and_targets: bool = global_step % config["actor_delay"] == 0
-            metrics = trainer.train_step(
-                batch,
-                fabric=fabric,
-                actor_optim=actor_optim,
-                critic_optim=critic_optim,
-                critic2_optim=critic2_optim,
-                actor_scheduler=actor_sch,
-                critic_scheduler=critic_sch,
-                critic2_scheduler=critic2_sch,
-                update_actor_and_targets=update_actor_and_targets
+            qdeltas = trainer.actor(point_cloud_labels, point_cloud, q, trainer.pc_bounds)
+            # Support models returning either [B, DOF] or [B, 1, DOF]
+            if qdeltas.dim() == 3:
+                qdelta = qdeltas[:, -1, :]
+            else:
+                qdelta = qdeltas
+            y_hats = torch.clamp(q + qdelta, min=-1, max=1)
+            (
+                cuboid_centers,
+                cuboid_dims,
+                cuboid_quats,
+                cylinder_centers,
+                cylinder_radii,
+                cylinder_heights,
+                cylinder_quats,
+                supervision,
+            ) = (
+                batch["cuboid_centers"],
+                batch["cuboid_dims"],
+                batch["cuboid_quats"],
+                batch["cylinder_centers"],
+                batch["cylinder_radii"],
+                batch["cylinder_heights"],
+                batch["cylinder_quats"],
+                batch["next_configuration"], # "supervision"
             )
-            if global_step % config["collect_rollouts_every_n_steps"] == 0:
-                actor_rollout_metrics = trainer.actor_rollout(batch)
-                if logger:
-                    logger.log_metrics({f"train/actor_rollouts/{k}": v for k, v in actor_rollout_metrics.items()}, step=global_step)
-            global_step += 1
+            assert trainer.robot is not None
+            y_hats_unnorm = trainer.robot.unnormalize_joints(y_hats)
+            supervision_unnorm = trainer.robot.unnormalize_joints(supervision)
+            collision_loss, point_match_loss = old_loss_fn(
+                y_hats_unnorm,
+                cuboid_centers,
+                cuboid_dims,
+                cuboid_quats,
+                cylinder_centers,
+                cylinder_radii,
+                cylinder_heights,
+                cylinder_quats,
+                supervision_unnorm,
+            )
 
+            trainer.actor_optim.zero_grad(set_to_none=True)
+            fabric.backward(point_match_loss)
+            torch.nn.utils.clip_grad_norm_(trainer.actor.parameters(), max_norm=1.0)
+            trainer.actor_optim.step()
+            if trainer.actor_scheduler is not None:
+                trainer.actor_scheduler.step()
+
+            metrics = {
+                "point_match_loss": point_match_loss.item(),
+            }
+
+            # update_targets: bool = global_step % config["actor_delay"] == 0
+            # use_actor_loss: bool = update_targets and (global_step > config["start_using_actor_loss"])
+            use_actor_loss = False
+            data_loader_iterations = 1
+            
+            # metrics = trainer.train_step(
+            #     batch,
+            #     fabric=fabric,
+            #     update_targets=update_targets,
+            #     use_actor_loss=use_actor_loss
+            # )
+
+
+            # if global_step % config["collect_rollouts_every_n_steps"] == 0:
+            #     actor_rollout_metrics = trainer.actor_rollout(batch) # fill the replay buffer
+            #     if logger:
+            #         logger.log_metrics(
+            #             {f"train/actor_rollouts/{k}": v for k, v in actor_rollout_metrics.items()},
+            #             step=global_step)
+            #         logger.log_metrics({"train/replay_buffer_size": len(replay_buffer)}, step=global_step)
+
+            log_actor_loss_when_available = False
             if logger and (global_step % config["log_every_n_steps"] == 0):
-                logger.log_metrics({f"train/{k}": v for k, v in metrics.items()}, step=global_step)
+                logger.log_metrics(
+                    {f"train/{k}": v for k, v in metrics.items()}, step=global_step)
+                if not use_actor_loss:
+                    log_actor_loss_when_available = True
+            # make sure actor loss is logged roughly every log_every_n_steps steps also, despite actor_delay
+            if logger and log_actor_loss_when_available and use_actor_loss:
+                logger.log_metrics(
+                    {"train/actor_loss": metrics["actor_loss"]}, step=global_step)
+                log_actor_loss_when_available = False
 
             # increment with the number of batches consumed from the expert loader
             prev = batch_idx
             batch_idx = min(n_batches, batch_idx + data_loader_iterations)
             if show_bar:
-                epoch_bar.set_postfix(loss=float(metrics["actor_loss"]), batch=f"{batch_idx}/{n_batches}", ordered_dict={"pretraining": pretraining})
+                epoch_bar.set_postfix(
+                    # batch=f"{batch_idx}/{n_batches}",
+                    ordered_dict={
+                        "point_match_loss": metrics["point_match_loss"], 
+                        "pretraining": "True" if pretraining else "False",
+                    })
                 epoch_bar.update(batch_idx - prev)
             if batch_idx >= n_batches:
                 break
 
-            if logger and (global_step % config["validate_every_n_steps"] == 0):
+            if logger and (global_step % config["validate_every_n_steps"] == 0) and global_step>0:
                 if show_bar:
                     cprint(f"\nValidation at global step {global_step}", "blue")
                 val_metrics = run_state_val_epoch(
@@ -320,15 +398,17 @@ def run():
                     "target_actor": trainer.target_actor.state_dict(),
                     "target_critic": trainer.target_critic.state_dict(),
                     "target_critic2": trainer.target_critic2.state_dict(),
-                    "actor_optim": actor_optim.state_dict(), 
-                    "critic_optim": critic_optim.state_dict(),
-                    "critic2_optim": critic2_optim.state_dict(),
-                    "actor_sch": actor_sch.state_dict(),
-                    "critic_sch": critic_sch.state_dict(),
-                    "critic2_sch": critic2_sch.state_dict()
+                    "actor_optim": trainer.actor_optim.state_dict(), 
+                    "critic_optim": trainer.critic_optim.state_dict(),
+                    "critic2_optim": trainer.critic2_optim.state_dict(),
+                    "actor_sch": trainer.actor_scheduler.state_dict(),
+                    "critic_sch": trainer.critic_scheduler.state_dict(),
+                    "critic2_sch": trainer.critic2_scheduler.state_dict()
                 },)
                 cprint(f"Saved checkpoint to {ckpt_path}", "green")
                 last_ckpt_time = time.time()
+
+            global_step += 1
 
         # end of epoch validation
         if show_bar:

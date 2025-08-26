@@ -30,7 +30,6 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         robot_dof: int,
         point_match_loss_weight: float,
         collision_loss_weight: float,
-        train_batch_size: int,
         disable_viz: bool,
         collision_loss_margin: float,
         min_lr: float,
@@ -56,6 +55,7 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
 
         self.urdf_path = urdf_path
         self.robot = None
+        self.robot_dof = robot_dof
         self.num_robot_points = num_robot_points
         self.point_match_loss_weight = point_match_loss_weight
         self.collision_loss_weight = collision_loss_weight
@@ -76,7 +76,6 @@ class PretrainingMotionPolicyTransformer(MotionPolicyTransformer):
         self.warmup_steps = warmup_steps
         self.decay_rate = decay_rate
         self.pc_bounds = torch.as_tensor(pc_bounds)
-        self.train_batch_size = train_batch_size
         self.corrected_step = 0
         self.logged_metrics: dict[str, float] = {}
         self.rollout_length = rollout_length

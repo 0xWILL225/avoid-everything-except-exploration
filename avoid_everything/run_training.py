@@ -83,7 +83,7 @@ def setup_logger(should_log: bool, experiment_name: str, config_values: Dict[str
     if not should_log:
         print("Disabling all logs")
         return None
-    logger = WandbLogger(name=experiment_name, project="avoid-everything", log_model=True)
+    logger = WandbLogger(name=experiment_name, project="avoid-everything-except-exploration", log_model=True)
     try:
         logger.log_hyperparams(config_values)
     except Exception:
@@ -170,18 +170,21 @@ def run():
     dm.setup("fit")
     # Setup dataloaders for distributed training
     train_loader = fabric.setup_dataloaders(dm.train_dataloader())
-    val_loaders = dm.val_dataloader()
+    val_loaders = dm.val_dataloaders()
     val_loaders = [fabric.setup_dataloaders(v) for v in val_loaders]
 
     # Training configuration
     max_epochs = int(config.get("max_epochs", 1))
-    max_train_batches = None
-    max_val_batches = None
-    # Limit epochs for smoke testing unless disabled
-    if os.environ.get("AE_SMOKE", "1") == "1" or bool(config.get("mintest", False)):
-        max_train_batches = 100
-        max_val_batches = 100
-        max_epochs = min(max_epochs, 1)
+    # max_train_batches = None
+    # max_val_batches = None
+    # # Limit epochs for smoke testing unless disabled
+    # if os.environ.get("AE_SMOKE", "1") == "1" or bool(config.get("mintest", False)):
+    #     max_train_batches = 100
+    #     max_val_batches = 100
+    #     max_epochs = min(max_epochs, 1)
+
+    max_val_batches = 100
+
     val_every_frac = config.get("val_every_n_fraction", None)
     val_every_batches = config.get("val_every_n_batches", None)
     val_every_epochs = config.get("val_every_n_epochs", None)
@@ -219,13 +222,13 @@ def run():
                     if bcount >= n_batches:
                         break
         # Print and log metrics
-        metrics = {k: v for k, v in getattr(mdl, "logged_metrics", {}).items()}
+        metrics = {f"val/{k}": v for k, v in getattr(mdl, "logged_metrics", {}).items()}
         # Add validation metric aggregates from torchmetrics
         try:
             metrics.update({
-                "val_point_match_loss": float(mdl.val_point_match_loss.compute().item()),
-                "val_collision_loss": float(mdl.val_collision_loss.compute().item()),
-                "val_loss": float(mdl.val_loss.compute().item()),
+                "val/val_point_match_loss": float(mdl.val_point_match_loss.compute().item()),
+                "val/val_collision_loss": float(mdl.val_collision_loss.compute().item()),
+                "val/val_loss": float(mdl.val_loss.compute().item()),
             })
         except Exception:
             pass
@@ -243,15 +246,15 @@ def run():
                     pass
         mdl.train()
 
+    # if max_train_batches is not None:
+    #     n_batches = max_train_batches
+    # else:
+    n_batches = len(train_loader)
+
     mdl.train()
     global_step = 0
     for epoch in range(max_epochs):
         show_bar = getattr(fabric, "global_rank", 0) == 0
-
-        if max_train_batches is not None:
-            n_batches = max_train_batches
-        else:
-            n_batches = len(train_loader)
 
         epoch_bar = tqdm(total=n_batches, desc=f"Epoch {epoch+1}/{max_epochs}", unit="batch", leave=False, disable=not show_bar, dynamic_ncols=True)
         # compute validation frequency
@@ -284,12 +287,12 @@ def run():
                     current_lr = None
                 try:
                     train_metrics = {
-                        "train_loss": float(train_loss.detach().item()),
-                        "point_match_loss": float(mdl.logged_metrics.get("point_match_loss", float('nan'))),
-                        "collision_loss": float(mdl.logged_metrics.get("collision_loss", float('nan'))),
+                        "train/train_loss": float(train_loss.detach().item()),
+                        "train/point_match_loss": float(mdl.logged_metrics.get("point_match_loss", float('nan'))),
+                        "train/collision_loss": float(mdl.logged_metrics.get("collision_loss", float('nan'))),
                     }
                     if current_lr is not None:
-                        train_metrics["lr"] = current_lr
+                        train_metrics["train/lr"] = current_lr
                     logger.log_metrics(train_metrics, step=global_step)
                 except Exception:
                     pass

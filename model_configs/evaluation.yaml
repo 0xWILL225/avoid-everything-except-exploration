@@ -31,16 +31,19 @@ training_model_parameters:
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
   hard_negative_ratio: null
   train_batch_size: 10
+
 data_module_parameters:
-  data_dir: DATA_PATH
+  data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
   random_scale: 0.015
+
 shared_parameters:
-  prismatic_joint: 0.04
+  urdf_path: /workspace/assets/panda/panda_spheres.urdf
   num_robot_points: 2048
   num_target_points: 128
+  
 num_workers: 10
 checkpoint_interval: 60
 val_every_n_minutes: 120
@@ -53,4 +56,4 @@ stop_early: false
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: EvaluationExperiment
 description: "Put in a description here to keep track of experiments"
-load_checkpoint_path: PATH/TO/CHECKPOINT
+load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt

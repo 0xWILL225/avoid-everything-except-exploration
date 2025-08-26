@@ -145,7 +145,7 @@ class CollisionAndBCLossFn:
         The fixed point cloud is important for loss calculation so that
         it's possible to take mse between the two pointclouds.
 
-        :param input_normalized torch.Tensor: Has dim [B, 7] and is always between -1 and 1
+        :param input torch.Tensor: Has dim [B, 7] and is always between -1 and 1
         :param cuboid_centers torch.Tensor: Has dim [B, M1, 3]
         :param cuboid_dims torch.Tensor: Has dim [B, M1, 3]
         :param cuboid_quaternions torch.Tensor: Has dim [B, M1, 4]. Quaternion is formatted as w, x, y, z.

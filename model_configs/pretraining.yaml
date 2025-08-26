@@ -30,7 +30,7 @@ training_model_parameters:
   warmup_steps: 5000
   decay_rate: null # 0.999
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
-  train_batch_size: 10
+  rollout_length: 69       # number of steps to rollout for the actor
   disable_viz: true
 
 data_module_parameters:
@@ -53,8 +53,8 @@ num_workers: 6
 checkpoint_interval: 30
 val_every_n_fraction: 0.2
 gpus: 1
-train_batch_size: 10
-val_batch_size: 10
+train_batch_size: 12
+val_batch_size: 12
 max_epochs: 100
 use_simple_model: false
 stop_early: false

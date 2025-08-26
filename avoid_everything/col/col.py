@@ -4,7 +4,6 @@ training the CoL motion policy.
 """
 
 from typing import Tuple, Callable, Dict
-from torch.utils.data import DataLoader
 from lightning import Fabric
 
 import numpy as np
@@ -32,7 +31,6 @@ class CoLMotionPolicyTrainer():
 
     def __init__(
         self,
-        replay_buffer: ReplayBuffer,
         urdf_path: str,
         num_robot_points: int,
         collision_reward: float,
@@ -52,13 +50,13 @@ class CoLMotionPolicyTrainer():
         exploration_noise: float,
         target_actor_noise: float,
         target_actor_noise_clip: float,
+        action_clip: float | str,
         use_huber_loss: bool,
         tau: float,
         grad_clip_norm: float,
         pc_bounds: list[list[float]],
         rollout_length: int
     ):
-        self.replay_buffer = replay_buffer
         self.urdf_path = urdf_path
         self.robot = None
         self.fk_sampler = None
@@ -83,6 +81,10 @@ class CoLMotionPolicyTrainer():
         self.exploration_noise = exploration_noise
         self.target_actor_noise = target_actor_noise
         self.target_actor_noise_clip = target_actor_noise_clip
+        if isinstance(action_clip, str):
+            self.action_clip = None
+        else:
+            self.action_clip = action_clip
         self.use_huber_loss = use_huber_loss
         self.tau = tau
         self.grad_clip_norm = grad_clip_norm
@@ -122,6 +124,13 @@ class CoLMotionPolicyTrainer():
             robot_dof=robot_dof,
         )
 
+        self.actor_optim: torch.optim.Optimizer
+        self.critic_optim: torch.optim.Optimizer
+        self.critic2_optim: torch.optim.Optimizer
+        self.actor_scheduler: torch.optim.lr_scheduler.LambdaLR
+        self.critic_scheduler: torch.optim.lr_scheduler.LambdaLR
+        self.critic2_scheduler: torch.optim.lr_scheduler.LambdaLR
+
     def configure_optimizers(self):
         """
         Build separate optimizers/schedulers for actor and critic.
@@ -147,6 +156,13 @@ class CoLMotionPolicyTrainer():
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.target_critic2.load_state_dict(self.critic2.state_dict())
+
+        self.actor_optim = actor_optim
+        self.critic_optim = critic_optim
+        self.critic2_optim = critic2_optim
+        self.actor_scheduler = actor_scheduler
+        self.critic_scheduler = critic_scheduler
+        self.critic2_scheduler = critic2_scheduler
 
         return {
             "actor_optim": actor_optim,
@@ -178,11 +194,21 @@ class CoLMotionPolicyTrainer():
         assert next(self.actor.parameters()).device == next(self.target_critic2.parameters()).device
         return next(self.actor.parameters()).device
 
-    def setup(self):
+    def setup(self, fabric: Fabric):
         """
         Device-critical initialization. Call after moving model to the desired 
         device. Initializes robot and point cloud sampler on current device.
         """
+
+        # fabric setup: wrap trainable modules w/ their optimizers
+        self.actor,  self.actor_optim  = fabric.setup(self.actor,  self.actor_optim)
+        self.critic, self.critic_optim = fabric.setup(self.critic, self.critic_optim)
+        self.critic2, self.critic2_optim = fabric.setup(self.critic2, self.critic2_optim)
+        # target networks have no optimizers
+        self.target_actor  = fabric.setup(self.target_actor)
+        self.target_critic = fabric.setup(self.target_critic)
+        self.target_critic2 = fabric.setup(self.target_critic2)
+
         self.device = self._verify_device()
         assert str(self.device) != "cpu", "You do not want to train on CPU"
         self.robot = Robot(self.urdf_path, device=self.device)
@@ -245,27 +271,15 @@ class CoLMotionPolicyTrainer():
         points = self.fk_sampler.sample(q)
         return points
 
-    def _actor_bc_losses(
+    def _bc_loss(
         self,
-        batch: dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q_pred: torch.Tensor,
+        q_next: torch.Tensor,
+        is_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        Actor-side losses on current networks:
-        - L_BC: BC point cloud loss (predicted q_next vs expert q_next)
-        - L_A:  actor loss = -E[Q(s, π(s))]
+        BC loss in point-cloud space
         """
-        pc_labels = batch["point_cloud_labels"]
-        pc        = batch["point_cloud"]
-        q         = batch["configuration"]          # [B, DOF] normalized
-        q_next    = batch["next_configuration"]     # [B, DOF] normalized
-        is_expert = batch["is_expert"]
-
-        # actor forward for BC: predicted next q via Δq
-        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
-        a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
-        q_pred  = torch.clamp(q + a_pred, -1, 1)
-
-        # BC loss in point-cloud space
         assert self.robot is not None
         q_next_unn = self.robot.unnormalize_joints(q_next)
         loss_bc = self.loss_fun.bc_pointcloud_loss(
@@ -273,18 +287,30 @@ class CoLMotionPolicyTrainer():
             expert_q_unnorm=q_next_unn,
             is_expert=is_expert,
         )
+        return loss_bc
 
+    def _actor_loss(
+        self,
+        pc_labels: torch.Tensor,
+        pc: torch.Tensor,
+        q: torch.Tensor,
+        a_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        RL Actor loss
+        """
         # don't backprop into critic
         for p in self.critic.parameters():
             p.requires_grad_(False)
         loss_actor = -self.critic(pc_labels, pc, q, a_pred, self.pc_bounds).mean()
         for p in self.critic.parameters():
             p.requires_grad_(True)
-        return loss_bc, loss_actor
+        return loss_actor
 
     def _critic_loss(
         self,
         batch: dict[str, torch.Tensor],
+        metrics: dict[str, float],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         One-step TD loss for critic using target networks.
@@ -295,11 +321,11 @@ class CoLMotionPolicyTrainer():
         r      = batch["reward"]
         done   = batch.get("done", torch.zeros_like(r))
 
-        # build s' point cloud by sampling robot at q_next
+        # build next state's (s') point cloud by sampling robot at q_next
         assert self.robot is not None
         q_next_unn = self.robot.unnormalize_joints(q_next)
         robot_pc = self._sample(q_next_unn)[..., :3]
-        next_pc = batch["point_cloud"].clone()
+        next_pc = batch["point_cloud"].detach().clone()
         next_pc[:, : robot_pc.size(1)] = robot_pc
 
         # target action a' = π'(s')
@@ -310,6 +336,8 @@ class CoLMotionPolicyTrainer():
         a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
                                       -self.target_actor_noise_clip,
                                       self.target_actor_noise_clip)
+        if self.action_clip is not None:
+            a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
 
         with torch.no_grad():
             q_next_target = self.target_critic(
@@ -322,6 +350,9 @@ class CoLMotionPolicyTrainer():
 
         q_sa = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
         q_sa2 = self.critic2(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        with torch.no_grad():
+            metrics["q_target_mean_(y)"] = float(y.mean().item())
+            metrics["q_sa_mean"]     = float(q_sa.mean().item())
         if self.use_huber_loss:
             return torch.nn.functional.huber_loss(q_sa, y, delta=1.0), \
                    torch.nn.functional.huber_loss(q_sa2, y, delta=1.0)
@@ -331,72 +362,94 @@ class CoLMotionPolicyTrainer():
     def train_step(
         self,
         batch: dict[str, torch.Tensor],
-        fabric,
-        actor_optim: torch.optim.Optimizer,
-        critic_optim: torch.optim.Optimizer,
-        critic2_optim: torch.optim.Optimizer,
-        actor_scheduler,
-        critic_scheduler,
-        critic2_scheduler,
-        update_actor_and_targets: bool,
+        fabric: Fabric,
+        update_targets: bool,
+        use_actor_loss: bool,
     ) -> Dict[str, float]:
         """
         One training iteration on a mixed (expert + actor) batch.
-        Calculates losses and performs optimization.
+        Calculates losses and performs optimization. Critic and BC losses are
+        always computed and optimized on. Target networks are updated only if
+        update_targets is True. The RL actor loss is only computed and optimized 
+        on if use_actor_loss is True.
 
         Computes L_BC, L_Q1, L_A via self._state_based_step(), then:
         1) critic step on L_Q1
         2) actor step on (λ_A * L_A + λ_BC * L_BC)
         3) Polyak soft-update of targets
 
-        Returns a flat dict of scalars for logging.
+        :param update_targets: Whether to update the target networks
+        :param use_actor_loss: Whether to use the actor loss (else just BC and critic updates)
+        :return: A flat dict of scalars for logging
         """
         # critic update on one-step TD loss first (keeps actor graph clean)
-        loss_q1, loss_q2 = self._critic_loss(batch)
-        critic_optim.zero_grad(set_to_none=True)
-        critic2_optim.zero_grad(set_to_none=True)
+        metrics = {}
+        loss_q1, loss_q2 = self._critic_loss(batch, metrics)
+        metrics.update({
+            "critic_loss_1": float(loss_q1.detach().item()),
+            "critic_loss_2": float(loss_q2.detach().item()),
+        })
+        self.critic_optim.zero_grad(set_to_none=True)
+        self.critic2_optim.zero_grad(set_to_none=True)
         fabric.backward(loss_q1 + loss_q2)
         clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
         clip_grad_norm_(self.critic2.parameters(), max_norm=self.grad_clip_norm)
-        critic_optim.step()
-        critic2_optim.step()
-        critic_scheduler.step()
-        critic2_scheduler.step()
+        self.critic_optim.step()
+        self.critic2_optim.step()
+        self.critic_scheduler.step()
+        self.critic2_scheduler.step()
 
-        if update_actor_and_targets:
-            # actor update on critic-guided actor loss (+ optional BC)
-            loss_bc, loss_actor = self._actor_bc_losses(batch)
-            actor_total = (self.actor_loss_weight       * loss_actor +
-                           self.point_match_loss_weight * loss_bc)
-            actor_optim.zero_grad(set_to_none=True)
-            fabric.backward(actor_total)
-            clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
-            actor_optim.step()
-            actor_scheduler.step()
+        # actor predict next q via Δq
+        q = batch["configuration"]
+        pc_labels = batch["point_cloud_labels"]
+        pc = batch["point_cloud"]
+        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
+        a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
+        if self.action_clip is not None:
+            a_pred = torch.clamp(a_pred, -self.action_clip, self.action_clip)
+        q_pred  = torch.clamp(q + a_pred, -1, 1)
 
-            self._polyak_update(tau=self.tau) # target soft update
+        loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
+        metrics["point_match_loss"] = float(loss_bc.detach().item())
 
-        metrics = {
-            "point_match_loss": float(loss_bc.detach().item()),
-            "critic_loss_1": float(loss_q1.detach().item()),
-            "critic_loss_2": float(loss_q2.detach().item()),
-            "actor_loss": float(loss_actor.detach().item()),
-        }
+        # actor update on critic-guided actor loss (+ optional BC)
+        if use_actor_loss:
+            loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
+            metrics["actor_loss"] = float(loss_actor.detach().item())
+            actor_total = (self.point_match_loss_weight * loss_bc +
+                            self.actor_loss_weight * loss_actor)
+        else:
+            actor_total = self.point_match_loss_weight * loss_bc
 
-        metrics["lr"]  = float(actor_optim.param_groups[0]["lr"])
+        self.actor_optim.zero_grad(set_to_none=True)
+        fabric.backward(actor_total)
+        clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
+        self.actor_optim.step()
+        self.actor_scheduler.step()
+
+        if update_targets:
+            self._polyak_update(tau=self.tau) # soft target update
+
+        metrics["lr"]  = float(self.actor_optim.param_groups[0]["lr"])
 
         return metrics
 
     @torch.no_grad()
-    def actor_rollout(self, batch: dict[str, torch.Tensor]) -> Dict[str, float]:
+    def actor_rollout(
+        self,
+        batch: dict[str, torch.Tensor],
+        replay_buffer: ReplayBuffer,
+    ) -> Dict[str, float]:
         """
-        Run a batch of actor rollouts to collect transitions for the replay 
+        Run a batch of actor rollouts to collect transitions for a replay 
         buffer. 
         Performs a batched rollout with self.rollout_length steps. Reaching the 
         goal (within 1cm and 15 degrees) or colliding with obstacles marks the 
         end of the episode for each rollout in the batch.
 
-        Returns a metrics dict including average episode reward across the batch.
+        :param batch: a batch of starting states
+        :param replay_buffer: a replay buffer to push the collected transitions to
+        :return: a metrics dict including average episode reward across the batch.
         """
         # use idx from dataset batch so the replay can fetch scenes later
         idx = batch["idx"]                     # [B]
@@ -427,7 +480,8 @@ class CoLMotionPolicyTrainer():
             qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [b, 1, DOF] or [b, DOF]
             a = (qdeltas[:, -1, :] if qdeltas.dim()==3 else qdeltas)
             a = a + torch.randn_like(a) * self.exploration_noise
-
+            if self.action_clip is not None:
+                a = torch.clamp(a, -self.action_clip, self.action_clip)
             q_next = (q_act + a).clamp(-1, 1)
             q_next_unn = self.robot.unnormalize_joints(q_next)
 
@@ -442,7 +496,7 @@ class CoLMotionPolicyTrainer():
             r_t = torch.where(collided, self.collision_reward,
                 torch.where(reached, self.goal_reward, self.step_reward)).float().unsqueeze(1)
 
-            self.replay_buffer.push(
+            replay_buffer.push(
                 idx=idx[active].cpu().numpy().astype(np.int64),
                 q=q_act.cpu().numpy().astype(np.float32),
                 a=a.cpu().numpy().astype(np.float32),
@@ -783,7 +837,7 @@ class CoLMotionPolicyTrainer():
         """
         Performs a validation step by calculating metrics on rollouts.
         """
-        rollouts = self.rollout(batch, self.rollout_length, self._sample) # 69 steps
+        rollouts = self.rollout(batch, self.rollout_length, self._sample)
         rollouts, _, has_reaching_success = self._end_rollouts_at_target(batch, rollouts)
         position_error, orientation_error = self._target_error(batch, rollouts)
         has_collision = self._collision_error(batch, rollouts)
@@ -798,3 +852,105 @@ class CoLMotionPolicyTrainer():
         self.val_success_rate.update(
             torch.logical_and(~has_collision, has_reaching_success).float().detach()
         )
+
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        *,
+        actor_only: bool = False,
+        map_location: str | torch.device | None = None,
+        **init_kwargs,
+    ) -> "CoLMotionPolicyTrainer":
+        """
+        Load a trainer instance from a checkpoint.
+
+        - If actor_only=True, only initializes and loads the actor weights
+          (compatible with legacy single-module checkpoints). Target actor
+          weights are mirrored from the actor. Critics remain randomly
+          initialized.
+        - Otherwise, attempts to restore all modules (actor, critics, targets)
+          from a Fabric-style checkpoint saved in run_training.py. Optimizers
+          and schedulers are configured and restored when available.
+
+        Any required __init__ kwargs (e.g., shared/training parameters) must be
+        provided via init_kwargs.
+        """
+
+        ckpt = torch.load(checkpoint_path, map_location=map_location or "cpu")
+
+        trainer = cls(**init_kwargs)
+        trainer.configure_optimizers()
+
+        def _load_actor_from_state_dict(state_dict: dict):
+            trainer.actor.load_state_dict(state_dict, strict=False)
+            trainer.target_actor.load_state_dict(trainer.actor.state_dict())
+
+        if actor_only:
+            if "actor" in ckpt and isinstance(ckpt["actor"], dict):
+                _load_actor_from_state_dict(ckpt["actor"])
+            elif "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+                _load_actor_from_state_dict(ckpt["state_dict"])
+            else:
+                maybe_sd = {k: v for k, v in ckpt.items() if isinstance(v, torch.Tensor)}
+                if maybe_sd:
+                    _load_actor_from_state_dict(maybe_sd)
+            return trainer
+
+        loaded_any = False
+        if isinstance(ckpt, dict):
+            if "actor" in ckpt:
+                trainer.actor.load_state_dict(ckpt["actor"], strict=False)
+                loaded_any = True
+            if "critic" in ckpt:
+                trainer.critic.load_state_dict(ckpt["critic"], strict=False)
+                loaded_any = True
+            if "critic2" in ckpt:
+                trainer.critic2.load_state_dict(ckpt["critic2"], strict=False)
+                loaded_any = True
+            if "target_actor" in ckpt:
+                trainer.target_actor.load_state_dict(ckpt["target_actor"], strict=False)
+            else:
+                trainer.target_actor.load_state_dict(trainer.actor.state_dict())
+            if "target_critic" in ckpt:
+                trainer.target_critic.load_state_dict(ckpt["target_critic"], strict=False)
+            if "target_critic2" in ckpt:
+                trainer.target_critic2.load_state_dict(ckpt["target_critic2"], strict=False)
+
+            if "actor_optim" in ckpt:
+                try:
+                    trainer.actor_optim.load_state_dict(ckpt["actor_optim"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "critic_optim" in ckpt:
+                try:
+                    trainer.critic_optim.load_state_dict(ckpt["critic_optim"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "critic2_optim" in ckpt:
+                try:
+                    trainer.critic2_optim.load_state_dict(ckpt["critic2_optim"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "actor_sch" in ckpt:
+                try:
+                    trainer.actor_scheduler.load_state_dict(ckpt["actor_sch"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "critic_sch" in ckpt:
+                try:
+                    trainer.critic_scheduler.load_state_dict(ckpt["critic_sch"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "critic2_sch" in ckpt:
+                try:
+                    trainer.critic2_scheduler.load_state_dict(ckpt["critic2_sch"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+
+        if not loaded_any and "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            trainer.actor.load_state_dict(ckpt["state_dict"], strict=False)
+            trainer.target_actor.load_state_dict(trainer.actor.state_dict())
+
+        return trainer
