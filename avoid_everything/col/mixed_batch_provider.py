@@ -14,8 +14,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 from avoid_everything.col.replay import ReplayBuffer
 
+from avoid_everything.utils.profiling import section
+
 def _to_tensor(x: Any) -> torch.Tensor:
-    """Convert a scalar or tensor-like to a torch.Tensor (on CPU).
+    """Convert a scalar or tensor-like to a torch.Tensor
 
     This helper standardizes values so that items returned from the expert
     loader can be collated uniformly.
@@ -56,7 +58,7 @@ class MixedBatchProvider:
     drawn from a replay sampler.
 
     The provider does not pre-load or store the entire expert dataset; instead it
-    maintains a small CPU-side pool to bridge DataLoader batch boundaries. This
+    maintains a small pool to bridge DataLoader batch boundaries. This
     enables precise batch assembly with minimal memory while staying compatible
     with typical PyTorch DataLoader usage.
     """
@@ -91,8 +93,7 @@ class MixedBatchProvider:
         """Split a batched expert dictionary into a list of per-sample dicts.
 
         Each tensor value in the input dict is sliced along dim=0 to produce
-        one dictionary per sample. Key renames are applied, and tensors are
-        stored on CPU to avoid holding GPU memory in the pool.
+        one dictionary per sample. Key renames are applied.
         """
         # Determine batch size by first tensor entry
         size = None
@@ -109,7 +110,7 @@ class MixedBatchProvider:
                 vv = v[i] if isinstance(v, torch.Tensor) else _to_tensor(v)
                 # Apply key mapping if needed (e.g., supervision -> next_configuration)
                 dst_key = self._key_renames.get(k, k)
-                item[dst_key] = vv.detach().cpu() if isinstance(vv, torch.Tensor) else _to_tensor(vv)
+                item[dst_key] = vv.detach() if isinstance(vv, torch.Tensor) else _to_tensor(vv)
             items.append(item)
         return items
 
@@ -157,6 +158,7 @@ class MixedBatchProvider:
         total_batch_size: int,
         expert_fraction: float,
         pretraining: bool,
+        device: torch.device | str | None = None,
     ) -> Tuple[Dict[str, torch.Tensor], int]:
         """Draw a mixed batch of expert and actor transitions.
 
@@ -169,26 +171,52 @@ class MixedBatchProvider:
             total_batch_size: Exact batch size to return.
             expert_fraction: Fraction of samples to sample from expert loader during fine-tuning.
             pretraining: If True, returns only expert samples.
+            device: Optional target device for actor samples (falls back to expert batch device).
 
         Returns:
             A dictionary of tensors representing a full batch and the number of 
             expert data loader iterations used to fill the batch.
         """
+        if pretraining:
+            try:
+                b = next(self._expert_iter)
+            except StopIteration:
+                self._expert_iter = iter(self._expert_loader)
+                b = next(self._expert_iter)
+            return b, 1
+
         assert expert_fraction >= 0.0 and expert_fraction <= 1.0
-        n_expert_samples = total_batch_size if pretraining else int(round(total_batch_size * expert_fraction))
+        n_expert_samples = int(round(total_batch_size * expert_fraction))
         n_actor_samples = total_batch_size - n_expert_samples
 
-        expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
-        actor_batch  = self.actor_replay.sample(n_actor_samples) if n_actor_samples > 0 else {}
+        timings = {}
+        with section("MBP._pop_expert", timings):
+            expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
+        
+        # choose a target device based on expert batch (if present)
+        if device is None:
+            if expert_batch:
+                for v in expert_batch.values():
+                    if isinstance(v, torch.Tensor):
+                        device = v.device
+                        break
+        with section("MBP.actor_replay.sample", timings):
+            actor_batch  = self.actor_replay.sample(n_actor_samples, device=device) if n_actor_samples > 0 else {}
 
         if n_expert_samples == 0:
             return actor_batch, 0
         if n_actor_samples == 0:
             return expert_batch, data_loader_iterations
 
-        common = expert_batch.keys() & actor_batch.keys()
-        merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
-        perm = torch.randperm(total_batch_size)
-        for k in merged:
-            merged[k] = merged[k][perm]
+        with section("MBP.merge_batches", timings):
+            common = expert_batch.keys() & actor_batch.keys()
+            merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
+
+        with section("MBP.permute_batch", timings):
+            any_tensor = next(iter(merged.values()))
+            perm = torch.randperm(total_batch_size, device=any_tensor.device)
+            for k in merged:
+                merged[k] = merged[k][perm]
+
+        print(timings)
         return merged, data_loader_iterations

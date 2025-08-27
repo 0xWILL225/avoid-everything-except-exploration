@@ -1,8 +1,12 @@
 import numpy as np
 import torch
+from termcolor import cprint
+
 from robofin.robots import Robot
 from robofin.samplers import TorchRobotSampler
 from avoid_everything.data_loader import Base
+
+from avoid_everything.utils.profiling import section
 
 class ReplayBuffer:
     """
@@ -11,110 +15,123 @@ class ReplayBuffer:
     scene state using the idx when sampling.
     """
 
-    def __init__(self, capacity: int, urdf_path: str, num_robot_points: int, num_target_points: int, dataset: Base):
+    def __init__(self, capacity: int, urdf_path: str, robot_dof: int, num_robot_points: int, num_target_points: int, dataset: Base):
         self.capacity = int(capacity)
         self.num_robot_points = num_robot_points
         self.num_target_points = num_target_points
-        self.robot = Robot(urdf_path)
-        self.robot_sampler = TorchRobotSampler(
-            self.robot,
-            num_robot_points=self.num_robot_points,
-            num_eef_points=self.num_target_points,
-            use_cache=True,
-            with_base_link=True,
-        )
+        self.urdf_path = urdf_path
+        self.robot = None
+        self.robot_sampler = None
         self.dataset = dataset # reference to the dataset (for extracting scene info)
-        self.idx   = np.zeros((capacity,), dtype=np.int32) # indices in the dataset (for reconstructing scene)
-        self.q     = np.zeros((capacity, self.robot.MAIN_DOF), dtype=np.float16) # normalized configurations
-        self.a     = np.zeros((capacity, self.robot.MAIN_DOF), dtype=np.float16) # normalized actions
-        self.qnext = np.zeros((capacity, self.robot.MAIN_DOF), dtype=np.float16) # normalized next configurations
-        self.r     = np.zeros((capacity, 1), dtype=np.float32) # rewards
-        self.done  = np.zeros((capacity, 1), dtype=np.uint8) # done flags
+
+        self.idx   = torch.empty(capacity, dtype=torch.int64,  pin_memory=True)
+        self.q     = torch.empty(capacity, robot_dof, dtype=torch.float16, pin_memory=True)
+        self.a     = torch.empty_like(self.q)
+        self.qnext = torch.empty_like(self.q)
+        self.r     = torch.empty(capacity, 1, dtype=torch.float32, pin_memory=True)
+        self.done  = torch.empty(capacity, 1, dtype=torch.uint8,  pin_memory=True)
         self.ptr = 0
         self.full = False
 
-    def push(self, idx: np.ndarray, q: np.ndarray, a: np.ndarray, q_next: np.ndarray, r: np.ndarray, done: np.ndarray):
-        """
-        Push a batch of transitions to the replay buffer. Implements a circular
-        buffer (FIFO).
+    def _ensure_robot_sampler(self, device: torch.device):
+        if self.robot_sampler is None or self.robot is None:
+            self.robot = Robot(self.urdf_path, device=device)
+            self.robot_sampler = TorchRobotSampler(
+                self.robot,
+                num_robot_points=self.num_robot_points,
+                num_eef_points=self.num_target_points,
+                with_base_link=True,
+                use_cache=True,
+                device=device,
+            )
+        assert self.robot_sampler.device == device, "Sampler device mismatch"
+        assert self.robot.device == device, "Robot device mismatch"
 
-        Args:
-            idx: (B,) int32
-            q: (B, DOF) float16
-            a: (B, DOF) float16
-            q_next: (B, DOF) float16
-            r: (B, 1) float32
-            done: (B, 1) uint8
-        """
+    def push(self, idx, q, a, q_next, r, done):
+        # expect tensors on GPU or CPU; move to CPU pinned asynchronously
+        idx    = idx.to('cpu', non_blocking=True, dtype=torch.int64)
+        q      = q.to('cpu', non_blocking=True, dtype=torch.float16)
+        a      = a.to('cpu', non_blocking=True, dtype=torch.float16)
+        q_next = q_next.to('cpu', non_blocking=True, dtype=torch.float16)
+        r      = r.to('cpu', non_blocking=True, dtype=torch.float32)
+        done   = done.to('cpu', non_blocking=True, dtype=torch.uint8)
+
         B = idx.shape[0]
         end = self.ptr + B
         if end <= self.capacity:
             sl = slice(self.ptr, end)
+            self.idx[sl].copy_(idx, non_blocking=True)
+            self.q[sl].copy_(q, non_blocking=True)
+            self.a[sl].copy_(a, non_blocking=True)
+            self.qnext[sl].copy_(q_next, non_blocking=True)
+            self.r[sl].copy_(r, non_blocking=True)
+            self.done[sl].copy_(done, non_blocking=True)
             self.ptr = end % self.capacity
             self.full = self.full or self.ptr == 0
         else:
-            # wrap-around
             first = self.capacity - self.ptr
             self.push(idx[:first], q[:first], a[:first], q_next[:first], r[:first], done[:first])
             self.push(idx[first:], q[first:], a[first:], q_next[first:], r[first:], done[first:])
-            return
-        self.idx[sl] = idx
-        self.q[sl] = q
-        self.a[sl] = a
-        self.qnext[sl] = q_next
-        self.r[sl] = r
-        self.done[sl] = done
 
     def __len__(self):
         return self.capacity if self.full else self.ptr
 
-    def sample(self, batch_size: int) -> dict[str, torch.Tensor]:
+    def sample(
+        self,
+        batch_size: int,
+        device: torch.device | str | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Sample a batch of transitions from the replay buffer.
         """
+        device = torch.device(device) if device is not None else torch.device('cpu')
         n = len(self)
-        assert n >= batch_size
-        ids = np.random.randint(0, n, size=batch_size)
+        ids = torch.randint(n, (batch_size,), device='cpu')
 
-        idx  = torch.from_numpy(self.idx[ids]).long()                  # [B]
-        q    = torch.from_numpy(self.q[ids]).to(torch.float32)         # [B, DOF]
-        a    = torch.from_numpy(self.a[ids]).to(torch.float32)         # [B, DOF]
-        qn   = torch.from_numpy(self.qnext[ids]).to(torch.float32)     # [B, DOF]
-        r    = torch.from_numpy(self.r[ids]).to(torch.float32)         # [B, 1]
-        done = torch.from_numpy(self.done[ids]).to(torch.float32)      # [B, 1]
+        timings = {}
+        with section("RB.gather_tensors", timings):
+            idx  = self.idx[ids].to(device, non_blocking=True)
+            q    = self.q[ids].to(dtype=torch.float32, device=device, non_blocking=True)
+            a    = self.a[ids].to(dtype=torch.float32, device=device, non_blocking=True)
+            qn   = self.qnext[ids].to(dtype=torch.float32, device=device, non_blocking=True)
+            r    = self.r[ids].to(device, non_blocking=True)
+            done = self.done[ids].to(dtype=torch.float32, device=device, non_blocking=True)
 
-        # deduplicate scene fetches, then map back to batch order
-        idx_np = idx.numpy()
-        uniq, inv = np.unique(idx_np, return_inverse=True)  # uniq[k] -> scene k, inv[i] = which uniq row
-        scenes = [self.dataset.scene_by_idx(int(u)) for u in uniq]  # each is CPU dict of tensors
+        with section("RB.unique_idx", timings):
+            uniq, inv = torch.unique(idx, sorted=True, return_inverse=True)
+        with section("RB.batch_scenes_by_idx", timings):
+            sc = self.dataset.batch_scenes_by_idx(uniq.cpu())  # CPU pinned
+        inv_cpu = inv.cpu()
+        
+        with section("RB.to_dev", timings):
+            def to_dev(x):  # x: CPU pinned [U, ...]
+                return x[inv_cpu].to(device, non_blocking=True)  # -> [B, ...]
+            cuboid_centers    = to_dev(sc["cuboid_centers"])
+            cuboid_dims       = to_dev(sc["cuboid_dims"])
+            cuboid_quats      = to_dev(sc["cuboid_quats"])
+            cylinder_centers  = to_dev(sc["cylinder_centers"])
+            cylinder_radii    = to_dev(sc["cylinder_radii"])
+            cylinder_heights  = to_dev(sc["cylinder_heights"])
+            cylinder_quats    = to_dev(sc["cylinder_quats"])
+            target_position   = to_dev(sc["target_position"])
+            target_orientation= to_dev(sc["target_orientation"])
+            scene_points      = to_dev(sc["scene_points"])
+            target_points     = to_dev(sc["target_points"])
 
-        # stack per-sample tensors in batch order using inv mapping
-        def stack_from_scenes(key):
-            return torch.stack([scenes[j][key] for j in inv], dim=0)
+        with section("RB.robot_sampling", timings):
+            self._ensure_robot_sampler(device)
+            assert self.robot is not None
+            assert self.robot_sampler is not None
+            q_unn = self.robot.unnormalize_joints(q)
+            robot_points = self.robot_sampler.sample(q_unn)[..., :3]  # [B, N_robot, 3]
 
-        cuboid_centers   = stack_from_scenes("cuboid_centers")
-        cuboid_dims      = stack_from_scenes("cuboid_dims")
-        cuboid_quats     = stack_from_scenes("cuboid_quats")
-        cylinder_centers = stack_from_scenes("cylinder_centers")
-        cylinder_radii   = stack_from_scenes("cylinder_radii")
-        cylinder_heights = stack_from_scenes("cylinder_heights")
-        cylinder_quats   = stack_from_scenes("cylinder_quats")
-        target_position  = stack_from_scenes("target_position")
-        target_orientation = stack_from_scenes("target_orientation")
-        scene_points     = stack_from_scenes("scene_points")    # [B, N_scene, 3]
-        target_points    = stack_from_scenes("target_points")   # [B, N_target, 3]
-
-        q_unn = self.robot.unnormalize_joints(q)
-        robot_points = self.robot_sampler.sample(q_unn)[..., :3]  # [B, N_robot, 3]
-        assert robot_points.dim() == 3, "Expecting batch dimension"
-
-        pc = torch.cat([robot_points, scene_points, target_points], dim=1)  # [B, N_total, 3]
-        B = pc.size(0)
-        labels = torch.cat([
-            torch.zeros((B, robot_points.size(1), 1)),
-            torch.ones((B, scene_points.size(1), 1)),
-            2*torch.ones((B, target_points.size(1), 1)),
-        ], dim=1)
+        with section("RB.pc_and_lables", timings):
+            pc = torch.cat([robot_points, scene_points, target_points], dim=1)  # [B, N_total, 3]
+            B = pc.size(0)
+            if not hasattr(self, "_labels"):
+                R, S, T = self.num_robot_points, self.dataset.num_obstacle_points, self.num_target_points
+                self._labels = torch.cat([torch.zeros(R,1), torch.ones(S,1), 2*torch.ones(T,1)], dim=0).pin_memory()
+            labels = self._labels.expand(B, -1, -1).to(device, non_blocking=True)
 
         batch = {
             "idx": idx,
@@ -134,6 +151,7 @@ class ReplayBuffer:
             "cylinder_quats": cylinder_quats,
             "target_position": target_position,
             "target_orientation": target_orientation,
-            "is_expert": torch.zeros(B, 1, dtype=torch.float32),
+            "is_expert": torch.zeros(B, 1, dtype=torch.float32, device=device),
         }
+        print(timings)
         return batch

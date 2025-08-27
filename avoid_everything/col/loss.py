@@ -124,7 +124,7 @@ class CoLLossFn:
         self.num_points = 1024
         self.collision_loss_margin = collision_loss_margin
 
-    def _ensure_fk(self, device: torch.device):
+    def _ensure_robot_sampler(self, device: torch.device):
         if self.fk_sampler is None:
             self.robot = Robot(self.urdf_path, device=device)
             self.fk_sampler = TorchRobotSampler(
@@ -156,7 +156,7 @@ class CoLLossFn:
         where both MSE and L1 are computed elementwise (reduction='none'),
         then averaged over points & coords per sample.
         """
-        self._ensure_fk(pred_q_unnorm.device)
+        self._ensure_robot_sampler(pred_q_unnorm.device)
         pred_pc   = self.sample(pred_q_unnorm)[..., :3]   # [B, N, 3]
         expert_pc = self.sample(expert_q_unnorm)[..., :3] # [B, N, 3]
 
@@ -202,7 +202,7 @@ class CoLLossFn:
         :param cylinder_quaternions torch.Tensor: Has dim [B, M2, 4]. Quaternion is formatted as w, x, y, z.
         :rtype torch.Tensor: The collision loss value aggregated over the batch
         """
-        self._ensure_fk(unnormalized_q.device)
+        self._ensure_robot_sampler(unnormalized_q.device)
         input_pc = self.sample(unnormalized_q)[..., :3]
         return collision_loss(
             input_pc,

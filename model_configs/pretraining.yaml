@@ -59,7 +59,7 @@ max_epochs: 100
 use_simple_model: false
 stop_early: false
 mintest: false
-no_logging: false
+no_logging: true
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Cretin: Avoid Everything with Fabric"
 description: "Testing training with pytorch lightning fabric"

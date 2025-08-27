@@ -106,6 +106,24 @@ class Base(Dataset):
         self.collision_reward = collision_reward if collision_reward is not None else 0.0
         self.step_reward = step_reward if step_reward is not None else 0.0
 
+    def batch_scenes_by_idx(self, idxs: torch.Tensor, *, pin: bool = True) -> dict[str, torch.Tensor]:
+        """
+        Returns a dict of stacked CPU tensors for all unique scene indices in `idxs`.
+        Shapes are [U, ...] where U = len(idxs).
+        NOTE: assumes per-scene shapes are consistent across the dataset (already padded).
+        """
+        idxs = idxs.to('cpu', non_blocking=False).to(torch.int64).view(-1)
+        # Reuse cached single-scene loads to avoid expensive recomputation
+        items = [self.scene_by_idx(int(i)) for i in idxs.tolist()]
+        assert len(items) > 0, "No indices passed to batch_scenes_by_idx"
+
+        keys = items[0].keys()
+        out: dict[str, torch.Tensor] = {}
+        for k in keys:
+            v = torch.stack([it[k] for it in items], dim=0)  # [U, ...], all CPU
+            out[k] = v.pin_memory() if pin else v
+        return out
+
     @lru_cache(maxsize=4096)
     def scene_by_idx(self, idx: int) -> dict[str, torch.Tensor]:
         """Returns dictionary with static scene info for a given idx (CPU tensors)."""
@@ -837,6 +855,7 @@ class DataModule:
             pin_memory=True,
             shuffle=True,
             persistent_workers=False if self.num_workers == 0 else True,
+            drop_last=True,
         )
 
     def dagger_dataloader(self) -> DataLoader:
@@ -846,6 +865,7 @@ class DataModule:
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=True,
+            drop_last=True,
         )
 
     def val_state_dataloader(self) -> DataLoader:
@@ -861,6 +881,7 @@ class DataModule:
             pin_memory=True,
             shuffle=True,
             persistent_workers=False if self.num_workers == 0 else True,
+            drop_last=True,
         )
 
     def val_trajectory_dataloader(self) -> DataLoader:
@@ -876,6 +897,7 @@ class DataModule:
             pin_memory=True,
             shuffle=True,
             persistent_workers=False if self.num_workers == 0 else True,
+            drop_last=True,
         )
 
     def val_dataloaders(self) -> DataLoader:

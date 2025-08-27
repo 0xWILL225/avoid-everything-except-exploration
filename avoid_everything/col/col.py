@@ -497,12 +497,12 @@ class CoLMotionPolicyTrainer():
                 torch.where(reached, self.goal_reward, self.step_reward)).float().unsqueeze(1)
 
             replay_buffer.push(
-                idx=idx[active].cpu().numpy().astype(np.int64),
-                q=q_act.cpu().numpy().astype(np.float32),
-                a=a.cpu().numpy().astype(np.float32),
-                q_next=q_next.cpu().numpy().astype(np.float32),
-                r=r_t.cpu().numpy().astype(np.float32),
-                done=done.unsqueeze(1).cpu().numpy().astype(np.uint8),
+                idx=idx[active],
+                q=q_act,
+                a=a,
+                q_next=q_next,
+                r=r_t,
+                done=done.unsqueeze(1),
             )
 
             # accumulate rewards for active episodes

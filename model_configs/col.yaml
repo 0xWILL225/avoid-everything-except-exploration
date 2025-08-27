@@ -61,10 +61,10 @@ shared_parameters:
 
 num_workers: 6                       # number of CPU workers for the data loaders
 checkpoint_interval: 30              # how often to save model checkpoints [minutes]
-pretraining_steps: 2000             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
+pretraining_steps: 51             # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
 start_using_actor_loss: 1000         # number of steps to wait before actor loss activates
 validate_every_n_steps: 1000         # how often to run mid-epoch validation epochs [global steps]
-collect_rollouts_every_n_steps: 100 # how often to collect actor rollouts for the replay buffer [global steps]
+collect_rollouts_every_n_steps: 50 # how often to collect actor rollouts for the replay buffer [global steps]
 log_every_n_steps: 50               # how often to log metrics to wandb [global steps]
 replay_buffer_capacity: 100000      # capacity of the replay buffer [number of transitions]
 n_gpus: 1                            # number of GPUs to use for training
@@ -78,7 +78,7 @@ expert_fraction: 0.25                # fraction of samples to sample from expert
 actor_delay: 1                       # delay for actor network's and target network's updates [TD3]
 max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
-logging: true                        # true: log to wandb
+logging: false                        # true: log to wandb
 save_checkpoint_dir: /workspace/checkpoints
 load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt
 experiment_name: "Cretin: Avoid Everything Except Exploration"
