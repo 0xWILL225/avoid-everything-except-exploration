@@ -11,12 +11,11 @@ actor transitions sampled from a replay sampler. It is designed to:
 """
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-import threading
-import queue
 import torch
+import threading, queue
 
 from avoid_everything.col.replay import ReplayBuffer
-
+from avoid_everything.utils.profiling import section
 
 class AsyncReplay:
     """
@@ -109,8 +108,6 @@ class MixedBatchProvider:
         self,
         expert_loader: Iterable[Any],
         actor_replay: ReplayBuffer,
-        use_async: bool = True,
-        async_prefetch: int = 3,
         *,
         key_renames: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -130,11 +127,10 @@ class MixedBatchProvider:
         self._key_renames = key_renames or {}
 
         self._actor_replay = actor_replay
-        self._use_async = use_async
         self._async: Optional[AsyncReplay] = None
         self._async_bs: Optional[int] = None
         self._async_dev: Optional[torch.device] = None
-        self._async_prefetch: int = async_prefetch
+        self._async_prefetch: int = 3
 
     def _split_batch_to_items(
         self,
@@ -264,8 +260,10 @@ class MixedBatchProvider:
         n_expert_samples = int(round(total_batch_size * expert_fraction))
         n_actor_samples = total_batch_size - n_expert_samples
 
-        expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
-
+        timings = {}
+        with section("MBP._pop_expert", timings):
+            expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
+        
         # choose a target device based on expert batch (if present)
         if device is None:
             if expert_batch:
@@ -275,27 +273,27 @@ class MixedBatchProvider:
                         break
         assert isinstance(device, torch.device)
 
-        if self._use_async:
+        with section("MBP.actor_replay.sample", timings):
+            # actor_batch  = self._actor_replay.sample(n_actor_samples, device=device) if n_actor_samples > 0 else {}
             self._ensure_async(n_actor_samples, device)
             actor_batch: Dict[str, torch.Tensor] = {}
             if n_actor_samples > 0:
                 assert self._async is not None, "AsyncReplay should be initialized for actor samples"
                 actor_batch = self._async.get()
-        else:
-            actor_batch  = self._actor_replay.sample(n_actor_samples, device=device) if n_actor_samples > 0 else {}
 
         if n_expert_samples == 0:
             return actor_batch, 0
         if n_actor_samples == 0:
             return expert_batch, data_loader_iterations
 
-        common = expert_batch.keys() & actor_batch.keys()
-        merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
+        with section("MBP.merge_batches", timings):
+            common = expert_batch.keys() & actor_batch.keys()
+            merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
 
-        
-        any_tensor = next(iter(merged.values()))
-        perm = torch.randperm(total_batch_size, device=any_tensor.device)
-        for k in merged:
-            merged[k] = merged[k][perm]
+        with section("MBP.permute_batch", timings):
+            any_tensor = next(iter(merged.values()))
+            perm = torch.randperm(total_batch_size, device=any_tensor.device)
+            for k in merged:
+                merged[k] = merged[k][perm]
 
         return merged, data_loader_iterations
