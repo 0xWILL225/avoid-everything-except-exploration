@@ -42,8 +42,10 @@ def run(cfg_path):
         batch = {key: val.cuda() for key, val in batch.items()}
         trainer.trajectory_validation_step(batch)
     print("Collision Rate:", f"{trainer.val_collision_rate.compute().item():.2%}")
+    print("Funnel Collision Rate:", f"{trainer.val_funnel_collision_rate.compute().item():.2%}")
     print("Reaching Success Rate:", f"{trainer.val_reaching_success_rate.compute().item():.2%}")
     print("Success Rate:", f"{trainer.val_success_rate.compute().item():.2%}")
+    print("Waypoint Count:", f"{trainer.val_waypoint_count.compute().item():.2}")
     print(
         "Target Position Error:",
         f"{100 * trainer.val_position_error.compute().item():.2}cm",

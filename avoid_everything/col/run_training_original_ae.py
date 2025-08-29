@@ -193,7 +193,14 @@ def run():
         trainer.critic.eval()
         trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
-        val_bar = tqdm(total=total, desc=desc, unit="batch", leave=False, dynamic_ncols=True)
+        val_bar = tqdm(
+            total=total,
+            desc=desc,
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+            disable=not is_rank_zero,
+        )
         it = 0
         with no_grad_inference():
             for batch in loader:

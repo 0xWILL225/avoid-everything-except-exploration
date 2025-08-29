@@ -92,9 +92,10 @@ class CoLMotionPolicyTrainer():
         self.val_position_error = torchmetrics.MeanMetric()
         self.val_orientation_error = torchmetrics.MeanMetric()
         self.val_collision_rate = torchmetrics.MeanMetric()
-        self.val_funnel_collision_rate = torchmetrics.MeanMetric()
+        self.val_funnel_collision_rate = torchmetrics.MeanMetric() # collision rate of successful reaches
         self.val_reaching_success_rate = torchmetrics.MeanMetric()
-        self.val_success_rate = torchmetrics.MeanMetric()
+        self.val_success_rate = torchmetrics.MeanMetric() # reaching success without collision
+        self.val_waypoint_count = torchmetrics.MeanMetric() # number of waypoints in successful reaches
         self.val_point_match_loss = torchmetrics.MeanMetric()
         self.val_collision_loss = torchmetrics.MeanMetric()
         self.val_loss = torchmetrics.MeanMetric()
@@ -235,6 +236,7 @@ class CoLMotionPolicyTrainer():
         for m in [self.val_position_error, self.val_orientation_error,
                   self.val_collision_rate, self.val_funnel_collision_rate,
                   self.val_reaching_success_rate, self.val_success_rate,
+                  self.val_waypoint_count,
                   self.val_point_match_loss, self.val_collision_loss,
                   self.val_loss]:
             m.to(self.device)
@@ -604,6 +606,7 @@ class CoLMotionPolicyTrainer():
         self.val_funnel_collision_rate.reset()
         self.val_reaching_success_rate.reset()
         self.val_success_rate.reset()
+        self.val_waypoint_count.reset()
 
     def compute_rollout_val_metrics(self) -> Dict[str, float]:
         return {
@@ -613,6 +616,7 @@ class CoLMotionPolicyTrainer():
             "val_funnel_collision_rate": float(self.val_funnel_collision_rate.compute().item()),
             "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
             "val_success_rate":          float(self.val_success_rate.compute().item()),
+            "val_waypoint_count":        float(self.val_waypoint_count.compute().item()),
         }
 
     def rollout(
@@ -838,7 +842,7 @@ class CoLMotionPolicyTrainer():
         Performs a validation step by calculating metrics on rollouts.
         """
         rollouts = self.rollout(batch, self.rollout_length, self._sample)
-        rollouts, _, has_reaching_success = self._end_rollouts_at_target(batch, rollouts)
+        rollouts, lengths, has_reaching_success = self._end_rollouts_at_target(batch, rollouts)
         position_error, orientation_error = self._target_error(batch, rollouts)
         has_collision = self._collision_error(batch, rollouts)
 
@@ -852,7 +856,7 @@ class CoLMotionPolicyTrainer():
         self.val_success_rate.update(
             torch.logical_and(~has_collision, has_reaching_success).float().detach()
         )
-
+        self.val_waypoint_count.update((lengths[has_reaching_success]).float())
 
     @classmethod
     def load_from_checkpoint(

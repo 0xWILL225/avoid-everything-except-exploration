@@ -52,8 +52,8 @@ data_module_parameters:
 
 shared_parameters:
   urdf_path: /workspace/assets/panda/panda_spheres.urdf
-  num_robot_points: 2048
   # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+  num_robot_points: 2048
   goal_reward: 1.0        # reward for reaching the goal
   collision_reward: -0.1  # reward for colliding with an obstacle
   step_reward: -0.01      # reward for each step that doesn't terminate the episode

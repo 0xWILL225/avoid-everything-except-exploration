@@ -1,0 +1,8 @@
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1004/1004 [49:22<00:00,  2.95s/it]
+Collision Rate: 7.30%
+Target Position Error: 0.59cm
+Target Orientation Error: 2.7°
+
+---
+
+With the original cache files for the franka robot, the results are much better.

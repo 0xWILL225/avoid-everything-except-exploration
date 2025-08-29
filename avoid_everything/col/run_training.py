@@ -97,7 +97,6 @@ def run():
     """
     Runs the CoL training procedure
     """
-
     config = parse_args_and_configuration()
     logger = setup_logger(config["logging"], config["experiment_name"], config)
 
@@ -110,7 +109,6 @@ def run():
     run_id = str(logger.version) if logger is not None else "default"
     save_dir = Path(base_save_dir) / run_id
     os.makedirs(save_dir, exist_ok=True)
-    
 
     fabric = Fabric(accelerator="gpu", devices=config["n_gpus"], precision="32-true")
     fabric.launch()
@@ -152,7 +150,7 @@ def run():
         dataset=dm.data_train
     )
     mixed_provider = MixedBatchProvider(
-        expert_loader=expert_loader, actor_replay=replay_buffer, use_async=False # NOTE: temporarily disabled async - reenable for CoL
+        expert_loader=expert_loader, actor_replay=replay_buffer
     )
     trainer = CoLMotionPolicyTrainer(
         **(config["shared_parameters"] or {}),
@@ -193,7 +191,14 @@ def run():
         trainer.critic.eval()
         trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
-        val_bar = tqdm(total=total, desc=desc, unit="batch", leave=False, dynamic_ncols=True)
+        val_bar = tqdm(
+            total=total,
+            desc=desc,
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+            disable=not is_rank_zero,
+        )
         it = 0
         with no_grad_inference():
             for batch in loader:
@@ -243,17 +248,12 @@ def run():
         )
 
         batch_idx = 0
-        # old_loss_fn = CollisionAndBCLossFn(
-        #     config["shared_parameters"]["urdf_path"],
-        #     config["training_model_parameters"]["collision_loss_margin"]
-        # )
         loss_fn = CoLLossFn(
             config["shared_parameters"]["urdf_path"],
             config["training_model_parameters"]["collision_loss_margin"]
         )
         for _ in range(n_batches):
-            # pretraining: bool = global_step < config["pretraining_steps"]
-            pretraining = True
+            pretraining: bool = global_step < config["pretraining_steps"]
             batch, data_loader_iterations = mixed_provider.sample(
                 8 if config["mintest"] else config["train_batch_size"],
                 expert_fraction=config["expert_fraction"],
@@ -261,102 +261,23 @@ def run():
                 device=fabric.device,
             )
 
-            point_cloud_labels, point_cloud, q = (
-                batch["point_cloud_labels"],
-                batch["point_cloud"],
-                batch["configuration"],
-            )
-            qdeltas = trainer.actor(point_cloud_labels, point_cloud, q, trainer.pc_bounds)
-            # Support models returning either [B, DOF] or [B, 1, DOF]
-            if qdeltas.dim() == 3:
-                qdelta = qdeltas[:, -1, :]
-            else:
-                qdelta = qdeltas
-            y_hats = torch.clamp(q + qdelta, min=-1, max=1)
-            (
-                cuboid_centers,
-                cuboid_dims,
-                cuboid_quats,
-                cylinder_centers,
-                cylinder_radii,
-                cylinder_heights,
-                cylinder_quats,
-                q_next,
-                is_expert,
-            ) = (
-                batch["cuboid_centers"],
-                batch["cuboid_dims"],
-                batch["cuboid_quats"],
-                batch["cylinder_centers"],
-                batch["cylinder_radii"],
-                batch["cylinder_heights"],
-                batch["cylinder_quats"],
-                batch["next_configuration"], # "supervision"
-                batch["is_expert"],
-            )
-            assert trainer.robot is not None
-            y_hats_unnorm = trainer.robot.unnormalize_joints(y_hats)
-            q_next_unnorm = trainer.robot.unnormalize_joints(q_next)
-            # collision_loss, point_match_loss = old_loss_fn(
-            #     y_hats_unnorm,
-            #     cuboid_centers,
-            #     cuboid_dims,
-            #     cuboid_quats,
-            #     cylinder_centers,
-            #     cylinder_radii,
-            #     cylinder_heights,
-            #     cylinder_quats,
-            #     supervision_unnorm,
-            # )
-
-            point_match_loss = loss_fn.bc_pointcloud_loss(
-                pred_q_unnorm=y_hats_unnorm,
-                expert_q_unnorm=q_next_unnorm,
-                is_expert=is_expert,
-            )
-
-            collision_loss = loss_fn.collision_loss(
-                unnormalized_q=y_hats_unnorm,
-                cuboid_centers=cuboid_centers,
-                cuboid_dims=cuboid_dims,
-                cuboid_quaternions=cuboid_quats,
-                cylinder_centers=cylinder_centers,
-                cylinder_radii=cylinder_radii,
-                cylinder_heights=cylinder_heights,
-                cylinder_quaternions=cylinder_quats,
-            )
-
-            trainer.actor_optim.zero_grad(set_to_none=True)
-            fabric.backward(point_match_loss + collision_loss * config["training_model_parameters"]["collision_loss_weight"])
-            torch.nn.utils.clip_grad_norm_(trainer.actor.parameters(), max_norm=config["training_model_parameters"]["grad_clip_norm"])
-            trainer.actor_optim.step()
-            if trainer.actor_scheduler is not None:
-                trainer.actor_scheduler.step()
-
-            metrics = {
-                "point_match_loss": point_match_loss.item(),
-                "collision_loss": collision_loss.item(),
-            }
-
-            # update_targets: bool = global_step % config["actor_delay"] == 0
-            # use_actor_loss: bool = update_targets and (global_step > config["start_using_actor_loss"])
-            use_actor_loss = False
-            # data_loader_iterations = 1
+            update_targets: bool = global_step % config["actor_delay"] == 0
+            use_actor_loss: bool = update_targets and (global_step > config["start_using_actor_loss"])
             
-            # metrics = trainer.train_step(
-            #     batch,
-            #     fabric=fabric,
-            #     update_targets=update_targets,
-            #     use_actor_loss=use_actor_loss
-            # )
+            metrics = trainer.train_step(
+                batch,
+                fabric=fabric,
+                update_targets=update_targets,
+                use_actor_loss=use_actor_loss
+            )
 
-            # if global_step % config["collect_rollouts_every_n_steps"] == 0:
-            #     actor_rollout_metrics = trainer.actor_rollout(batch, replay_buffer) # fill the replay buffer
-            #     if logger:
-            #         logger.log_metrics(
-            #             {f"train/actor_rollouts/{k}": v for k, v in actor_rollout_metrics.items()},
-            #             step=global_step)
-            #         logger.log_metrics({"train/replay_buffer_size": len(replay_buffer)}, step=global_step)
+            if global_step % config["collect_rollouts_every_n_steps"] == 0:
+                actor_rollout_metrics = trainer.actor_rollout(batch, replay_buffer) # fill the replay buffer
+                if logger:
+                    logger.log_metrics(
+                        {f"train/actor_rollouts/{k}": v for k, v in actor_rollout_metrics.items()},
+                        step=global_step)
+                    logger.log_metrics({"train/replay_buffer_size": len(replay_buffer)}, step=global_step)
 
             log_actor_loss_when_available = False
             if logger and (global_step % config["log_every_n_steps"] == 0):
@@ -371,6 +292,7 @@ def run():
                 log_actor_loss_when_available = False
 
             # increment with the number of batches consumed from the expert loader
+            # NOTE: This makes it APPEAR as if training slows down to `expert_fraction` of pre-training speed
             prev = batch_idx
             batch_idx = min(n_batches, batch_idx + data_loader_iterations)
             if is_rank_zero:
