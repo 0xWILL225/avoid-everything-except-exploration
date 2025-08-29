@@ -9,7 +9,6 @@ services:
         USERNAME: fishbotics
     image: avoid-everything:latest
     
-    # GPU access (equivalent to --gpus all)
     deploy:
       resources:
         reservations:
@@ -18,11 +17,9 @@ services:
               count: all
               capabilities: [gpu]
     
-    # Network and privilege settings
     network_mode: host
     privileged: true
     
-    # Environment variables
     environment:
       - DISPLAY=${DISPLAY}
       - NVIDIA_VISIBLE_DEVICES=all
@@ -30,21 +27,18 @@ services:
       - NCCL_DEBUG=WARN
       - PYTHONPATH=/workspace
     
-    # Volume mounts
     volumes:
-      # Mount the workspace (parent directory which contains the whole repo)
       - ..:/workspace:cached
-      # Mount X11 socket for GUI applications
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      # Mount host's timezone
       - /etc/localtime:/etc/localtime:ro
     
-    # Working directory
     working_dir: /workspace
     
-    # Keep container running
+    # keep container running
     stdin_open: true
     tty: true
+
+    # increase shared memory size
+    shm_size: 10G
     
-    # Command to run
     command: /bin/bash -c "while sleep 1000; do :; done" 
