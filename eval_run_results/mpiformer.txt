@@ -6,3 +6,15 @@ Target Orientation Error: 2.7°
 ---
 
 With the original cache files for the franka robot, the results are much better.
+
+---
+With more data printed:
+
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 836/836 [39:43<00:00,  2.85s/it]
+Collision Rate: 7.22%
+Funnel Collision Rate: 7.20%
+Reaching Success Rate: 99.55%
+Success Rate: 92.38%
+Waypoint Count: 28
+Target Position Error: 0.61cm
+Target Orientation Error: 2.7°

@@ -2,3 +2,15 @@
 Collision Rate: 0.84%
 Target Position Error: 0.63cm
 Target Orientation Error: 2.1°
+
+---
+With more data printed:
+
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 836/836 [40:12<00:00,  2.89s/it]
+Collision Rate: 0.75%
+Funnel Collision Rate: 0.68%
+Reaching Success Rate: 99.35%
+Success Rate: 98.67%
+Waypoint Count: 29
+Target Position Error: 0.68cm
+Target Orientation Error: 2.2°

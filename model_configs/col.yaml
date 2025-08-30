@@ -67,9 +67,9 @@ validate_every_n_steps: 10000         # how often to run mid-epoch validation ep
 collect_rollouts_every_n_steps: 50 # how often to collect actor rollouts for the replay buffer [global steps]
 log_every_n_steps: 50               # how often to log metrics to wandb [global steps]
 replay_buffer_capacity: 100000      # capacity of the replay buffer [number of transitions]
-n_gpus: 2                            # number of GPUs to use for training
-train_batch_size: 50                 # batch size for training
-val_batch_size: 50                   # batch size for validation
+n_gpus: 1                            # number of GPUs to use for training
+train_batch_size: 12                 # batch size for training
+val_batch_size: 12                   # batch size for validation
 mid_epoch_max_val_batches: 1000       # maximum number of batches to validate on during mid-epoch validation
 mid_epoch_max_val_rollouts: 200       # maximum number of rollouts to validate on during mid-epoch validation
 end_epoch_max_val_batches: 2000      # maximum number of batches to validate on at end-of-epoch validation
@@ -80,7 +80,7 @@ max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb
 load_model_from_checkpoint: false
-load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt
+load_checkpoint_path: /workspace/checkpoints/avoid_everything_cubby.ckpt
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Superserver: Avoid Everything Except Exploration"
 description: "Original AE without RL stuff"
