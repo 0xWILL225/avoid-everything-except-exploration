@@ -154,10 +154,17 @@ def run():
     mixed_provider = MixedBatchProvider(
         expert_loader=expert_loader, actor_replay=replay_buffer, use_async=False # NOTE: temporarily disabled async - reenable for CoL
     )
-    trainer = CoLMotionPolicyTrainer(
-        **(config["shared_parameters"] or {}),
-        **(config["training_model_parameters"] or {}),
-    )
+    if config["load_model_from_checkpoint"]:
+        trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
+            config["load_checkpoint_path"],
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
+    else:
+        trainer = CoLMotionPolicyTrainer(
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
 
     # clear any cached memory before training
     gc.collect()
@@ -297,17 +304,7 @@ def run():
             assert trainer.robot is not None
             y_hats_unnorm = trainer.robot.unnormalize_joints(y_hats)
             q_next_unnorm = trainer.robot.unnormalize_joints(q_next)
-            # collision_loss, point_match_loss = old_loss_fn(
-            #     y_hats_unnorm,
-            #     cuboid_centers,
-            #     cuboid_dims,
-            #     cuboid_quats,
-            #     cylinder_centers,
-            #     cylinder_radii,
-            #     cylinder_heights,
-            #     cylinder_quats,
-            #     supervision_unnorm,
-            # )
+
 
             point_match_loss = loss_fn.bc_pointcloud_loss(
                 pred_q_unnorm=y_hats_unnorm,

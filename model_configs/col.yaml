@@ -79,8 +79,8 @@ actor_delay: 2                       # delay for actor network's and target netw
 max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb
-load_model_from_checkpoint: false
-load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt
+load_model_from_checkpoint: true
+load_checkpoint_path: /workspace/checkpoints/ybyu9ibw/fabric-epoch2-step412779.ckpt
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "Superserver: Avoid Everything Except Exploration"
 description: "Original AE without RL stuff"
