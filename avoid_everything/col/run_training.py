@@ -152,10 +152,17 @@ def run():
     mixed_provider = MixedBatchProvider(
         expert_loader=expert_loader, actor_replay=replay_buffer
     )
-    trainer = CoLMotionPolicyTrainer(
-        **(config["shared_parameters"] or {}),
-        **(config["training_model_parameters"] or {}),
-    )
+    if config["load_model_from_checkpoint"]:
+        trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
+            config["load_checkpoint_path"],
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
+    else:
+        trainer = CoLMotionPolicyTrainer(
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
 
     # clear any cached memory before training
     gc.collect()
@@ -248,10 +255,6 @@ def run():
         )
 
         batch_idx = 0
-        loss_fn = CoLLossFn(
-            config["shared_parameters"]["urdf_path"],
-            config["training_model_parameters"]["collision_loss_margin"]
-        )
         for _ in range(n_batches):
             pretraining: bool = global_step < config["pretraining_steps"]
             batch, data_loader_iterations = mixed_provider.sample(
@@ -286,7 +289,7 @@ def run():
                 if not use_actor_loss:
                     log_actor_loss_when_available = True
             # make sure actor loss is logged roughly every log_every_n_steps steps also, despite actor_delay
-            if logger and log_actor_loss_when_available and use_actor_loss:
+            if logger and use_actor_loss and log_actor_loss_when_available:
                 logger.log_metrics(
                     {"train/actor_loss": metrics["actor_loss"]}, step=global_step)
                 log_actor_loss_when_available = False
