@@ -1,0 +1,9 @@
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1004/1004 [51:24<00:00,  3.07s/it]
+Collision Rate: 20.26%
+Target Position Error: 4.2cm
+Target Orientation Error: 1.6e+01°
+
+---
+
+This evaluation did not use the original point cloud caches from the robofin git,
+which I strongly believe influenced results.
