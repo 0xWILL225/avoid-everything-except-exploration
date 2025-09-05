@@ -47,9 +47,6 @@ from avoid_everything.data_loader import DataModule
 from avoid_everything.col.mixed_batch_provider import MixedBatchProvider
 from avoid_everything.col.replay import ReplayBuffer
 
-# from avoid_everything.loss import CollisionAndBCLossFn
-from avoid_everything.col.loss import CoLLossFn
-
 
 torch.set_default_dtype(torch.float32)
 torch.set_float32_matmul_precision("high")
@@ -150,7 +147,7 @@ def run():
         dataset=dm.data_train
     )
     mixed_provider = MixedBatchProvider(
-        expert_loader=expert_loader, actor_replay=replay_buffer
+        expert_loader=expert_loader, actor_replay=replay_buffer, async_prefetch=5
     )
     if config["load_model_from_checkpoint"]:
         trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
@@ -179,8 +176,8 @@ def run():
             "critic": trainer.critic,
             "target_actor": trainer.target_actor,
             "target_critic": trainer.target_critic,
-            "critic2": trainer.critic2,
-            "target_critic2": trainer.target_critic2,
+            # "critic2": trainer.critic2,
+            # "target_critic2": trainer.target_critic2,
         }.items():
             tot, tr = count_params(module)
             print(f"    {name:14s}  total={pretty_k(tot):>7}  trainable={pretty_k(tr):>7}")
@@ -196,7 +193,7 @@ def run():
     ):
         trainer.actor.eval()
         trainer.critic.eval()
-        trainer.critic2.eval()
+        # trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
         val_bar = tqdm(
             total=total,
@@ -217,7 +214,7 @@ def run():
         val_bar.close()
         trainer.actor.train()
         trainer.critic.train()
-        trainer.critic2.train()
+        # trainer.critic2.train()
 
     def run_state_val_epoch(val_state_loader, max_val_batches=None):
         trainer.reset_state_val_metrics()
@@ -255,8 +252,11 @@ def run():
         )
 
         batch_idx = 0
+        
         for _ in range(n_batches):
             pretraining: bool = global_step < config["pretraining_steps"]
+
+            
             batch, data_loader_iterations = mixed_provider.sample(
                 8 if config["mintest"] else config["train_batch_size"],
                 expert_fraction=config["expert_fraction"],
@@ -300,7 +300,6 @@ def run():
             batch_idx = min(n_batches, batch_idx + data_loader_iterations)
             if is_rank_zero:
                 epoch_bar.set_postfix(
-                    # batch=f"{batch_idx}/{n_batches}",
                     ordered_dict={
                         "point_match_loss": metrics["point_match_loss"], 
                         "pretraining": "True" if pretraining else "False",
@@ -325,16 +324,12 @@ def run():
                 fabric.save(str(ckpt_path), {
                     "actor": trainer.actor.state_dict(), 
                     "critic": trainer.critic.state_dict(), 
-                    "critic2": trainer.critic2.state_dict(),
                     "target_actor": trainer.target_actor.state_dict(),
                     "target_critic": trainer.target_critic.state_dict(),
-                    "target_critic2": trainer.target_critic2.state_dict(),
                     "actor_optim": trainer.actor_optim.state_dict(), 
                     "critic_optim": trainer.critic_optim.state_dict(),
-                    "critic2_optim": trainer.critic2_optim.state_dict(),
                     "actor_sch": trainer.actor_scheduler.state_dict(),
                     "critic_sch": trainer.critic_scheduler.state_dict(),
-                    "critic2_sch": trainer.critic2_scheduler.state_dict()
                 },)
                 cprint(f"Saved checkpoint to {ckpt_path}", "green")
                 last_ckpt_time = time.time()

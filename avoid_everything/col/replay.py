@@ -1,3 +1,4 @@
+import threading
 import torch
 
 from robofin.robots import Robot
@@ -27,6 +28,7 @@ class ReplayBuffer:
         self.robot_sampler = None
         self.dataset = dataset # reference to the dataset (for extracting scene info)
 
+        # data pinned to CPU memory (RAM)
         self.idx   = torch.empty(capacity, dtype=torch.int64,  pin_memory=True)
         self.q     = torch.empty(capacity, robot_dof, dtype=torch.float16, pin_memory=True)
         self.a     = torch.empty_like(self.q)
@@ -35,6 +37,8 @@ class ReplayBuffer:
         self.done  = torch.empty(capacity, 1, dtype=torch.uint8,  pin_memory=True)
         self.ptr = 0
         self.full = False
+
+        self._lock = threading.Lock()
 
     def _ensure_robot_sampler(self, device: torch.device):
         if self.robot_sampler is None or self.robot is None:
@@ -55,29 +59,45 @@ class ReplayBuffer:
         Add a transition to the replay buffer. Expects tensors on GPU or CPU; 
         moves them to CPU pinned asynchronously
         """
-        idx    = idx.to('cpu', non_blocking=True, dtype=torch.int64)
-        q      = q.to('cpu', non_blocking=True, dtype=torch.float16)
-        a      = a.to('cpu', non_blocking=True, dtype=torch.float16)
-        q_next = q_next.to('cpu', non_blocking=True, dtype=torch.float16)
-        r      = r.to('cpu', non_blocking=True, dtype=torch.float32)
-        done   = done.to('cpu', non_blocking=True, dtype=torch.uint8)
+        idx    = idx.to(dtype=torch.int64)
+        q      = q.to(dtype=torch.float16)
+        a      = a.to(dtype=torch.float16)
+        q_next = q_next.to(dtype=torch.float16)
+        r      = r.to(dtype=torch.float32)
+        done   = done.to(dtype=torch.uint8)
 
         B = idx.shape[0]
-        end = self.ptr + B
-        if end <= self.capacity:
-            sl = slice(self.ptr, end)
-            self.idx[sl].copy_(idx, non_blocking=True)
-            self.q[sl].copy_(q, non_blocking=True)
-            self.a[sl].copy_(a, non_blocking=True)
-            self.qnext[sl].copy_(q_next, non_blocking=True)
-            self.r[sl].copy_(r, non_blocking=True)
-            self.done[sl].copy_(done, non_blocking=True)
-            self.ptr = end % self.capacity
-            self.full = self.full or self.ptr == 0
-        else:
-            first = self.capacity - self.ptr
-            self.push(idx[:first], q[:first], a[:first], q_next[:first], r[:first], done[:first])
-            self.push(idx[first:], q[first:], a[first:], q_next[first:], r[first:], done[first:])
+        with self._lock:
+            end = self.ptr + B
+            if end <= self.capacity:
+                sl = slice(self.ptr, end)
+                self.idx[sl].copy_(idx,      non_blocking=True)  # src may be CUDA -> pinned CPU (async)
+                self.q[sl].copy_(q,          non_blocking=True)
+                self.a[sl].copy_(a,          non_blocking=True)
+                self.qnext[sl].copy_(q_next, non_blocking=True)
+                self.r[sl].copy_(r,          non_blocking=True)
+                self.done[sl].copy_(done,    non_blocking=True)
+            else:
+                first = self.capacity - self.ptr
+                sl1 = slice(self.ptr, self.capacity)
+                sl2 = slice(0, end - self.capacity)
+
+                self.idx[sl1].copy_(idx[:first],      non_blocking=True)
+                self.q[sl1].copy_(q[:first],          non_blocking=True)
+                self.a[sl1].copy_(a[:first],          non_blocking=True)
+                self.qnext[sl1].copy_(q_next[:first], non_blocking=True)
+                self.r[sl1].copy_(r[:first],          non_blocking=True)
+                self.done[sl1].copy_(done[:first],    non_blocking=True)
+
+                self.idx[sl2].copy_(idx[first:],      non_blocking=True)
+                self.q[sl2].copy_(q[first:],          non_blocking=True)
+                self.a[sl2].copy_(a[first:],          non_blocking=True)
+                self.qnext[sl2].copy_(q_next[first:], non_blocking=True)
+                self.r[sl2].copy_(r[first:],          non_blocking=True)
+                self.done[sl2].copy_(done[first:],    non_blocking=True)
+
+            self.ptr  = end % self.capacity
+            self.full = self.full or (self.ptr == 0)
 
     def __len__(self):
         return self.capacity if self.full else self.ptr
@@ -91,15 +111,33 @@ class ReplayBuffer:
         Sample a batch of transitions from the replay buffer.
         """
         device = torch.device(device) if device is not None else torch.device('cpu')
-        n = len(self)
-        ids = torch.randint(n, (batch_size,), device='cpu')
 
-        idx  = self.idx[ids].to(device, non_blocking=True)
-        q    = self.q[ids].to(dtype=torch.float32, device=device, non_blocking=True)
-        a    = self.a[ids].to(dtype=torch.float32, device=device, non_blocking=True)
-        qn   = self.qnext[ids].to(dtype=torch.float32, device=device, non_blocking=True)
-        r    = self.r[ids].to(device, non_blocking=True)
-        done = self.done[ids].to(dtype=torch.float32, device=device, non_blocking=True)
+        with self._lock:
+            n = len(self)
+            assert n >= batch_size, "replay underflow"
+            ids = torch.randint(n, (batch_size,), device='cpu')
+
+            # snapshot rows on CPU to detach from concurrent writers
+            idx   = self.idx[ids].clone()
+            q     = self.q[ids].clone().to(dtype=torch.float32)
+            a     = self.a[ids].clone().to(dtype=torch.float32)
+            qn    = self.qnext[ids].clone().to(dtype=torch.float32)
+            r     = self.r[ids].clone()
+            done  = self.done[ids].clone().to(dtype=torch.float32)
+
+        max_idx = int(len(self.dataset))
+        bad = (idx < 0) | (idx >= max_idx)
+        if bad.any():
+            # Let AsyncReplay retry instead of crashing the thread:
+            raise ValueError(f"ReplayBuffer invalid indices: {int(bad.sum())}/{bad.numel()}")
+
+        # (after releasing lock) move to device
+        idx  = idx.to(device, non_blocking=True)
+        q    = q.to(device, non_blocking=True)
+        a    = a.to(device, non_blocking=True)
+        qn   = qn.to(device, non_blocking=True)
+        r    = r.to(device, non_blocking=True)
+        done = done.to(device, non_blocking=True)
 
         uniq, inv = torch.unique(idx, sorted=True, return_inverse=True)
         sc = self.dataset.batch_scenes_by_idx(uniq.cpu())  # CPU pinned

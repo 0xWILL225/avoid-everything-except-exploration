@@ -16,10 +16,11 @@ from robofin.samplers import TorchRobotSampler
 
 from avoid_everything.geometry import TorchCuboids, TorchCylinders
 from avoid_everything.mpiformer import MotionPolicyTransformer
-from avoid_everything.col.twin_critic import TwinCritic
+from avoid_everything.col.critic_mpiformer import CriticMPiFormer
 from avoid_everything.col.loss import CoLLossFn
 from avoid_everything.col.replay import ReplayBuffer
 
+from avoid_everything.utils.profiling import section
 
 class CoLMotionPolicyTrainer():
     """
@@ -107,19 +108,29 @@ class CoLMotionPolicyTrainer():
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
-        self.critic = TwinCritic(
+        self.critic = CriticMPiFormer(
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
-        self.target_critic = TwinCritic(
+        self.target_critic = CriticMPiFormer(
+            num_robot_points=num_robot_points,
+            robot_dof=robot_dof,
+        )
+        self.critic2 = CriticMPiFormer(
+            num_robot_points=num_robot_points,
+            robot_dof=robot_dof,
+        )
+        self.target_critic2 = CriticMPiFormer(
             num_robot_points=num_robot_points,
             robot_dof=robot_dof,
         )
 
         self.actor_optim: torch.optim.Optimizer
         self.critic_optim: torch.optim.Optimizer
+        self.critic2_optim: torch.optim.Optimizer
         self.actor_scheduler: torch.optim.lr_scheduler.LambdaLR
         self.critic_scheduler: torch.optim.lr_scheduler.LambdaLR
+        self.critic2_scheduler: torch.optim.lr_scheduler.LambdaLR
 
     def configure_optimizers(self):
         """
@@ -127,33 +138,40 @@ class CoLMotionPolicyTrainer():
         Target networks are updated via Polyak soft updates (no optimizer).
         """
         betas = (0.9, 0.95)
-        self.actor_optim  = torch.optim.AdamW(
+        actor_optim  = torch.optim.AdamW(
             self.actor.parameters(),  lr=self.min_lr,  weight_decay=self.weight_decay, betas=betas)
-        critic_param_groups = [
-            {"params": self.critic.pc_encoder.parameters(), "lr": self.min_lr, "name": "critic_shared"},
-            {"params": self.critic.q1.parameters(),         "lr": self.min_lr, "name": "critic_q1"},
-            {"params": self.critic.q2.parameters(),         "lr": self.min_lr, "name": "critic_q2"},
-        ]
-        self.critic_optim = torch.optim.AdamW(
-            critic_param_groups, lr=self.min_lr, weight_decay=self.weight_decay, betas=betas)
+        critic_optim = torch.optim.AdamW(
+            self.critic.parameters(), lr=self.min_lr, weight_decay=self.weight_decay, betas=betas)
+        critic2_optim = torch.optim.AdamW(
+            self.critic2.parameters(), lr=self.min_lr, weight_decay=self.weight_decay, betas=betas)
 
         def lr_lambda(step):
             lr = self.min_lr + (self.max_lr - self.min_lr) * min(1.0, step / self.warmup_steps)
             return lr / self.min_lr
 
-        self.actor_scheduler  = LambdaLR(self.actor_optim,  lr_lambda)
-        self.critic_scheduler = LambdaLR(self.critic_optim, lr_lambda)
+        actor_scheduler  = LambdaLR(actor_optim,  lr_lambda)
+        critic_scheduler = LambdaLR(critic_optim, lr_lambda)
+        critic2_scheduler = LambdaLR(critic2_optim, lr_lambda)
 
         # Hard-copy weights into targets once here; call polyak_update() each step.
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
+        self.target_critic2.load_state_dict(self.critic2.state_dict())
 
+        self.actor_optim = actor_optim
+        self.critic_optim = critic_optim
+        self.critic2_optim = critic2_optim
+        self.actor_scheduler = actor_scheduler
+        self.critic_scheduler = critic_scheduler
+        self.critic2_scheduler = critic2_scheduler
 
         return {
-            "actor_optim": self.actor_optim,
-            "critic_optim": self.critic_optim,
-            "actor_scheduler": self.actor_scheduler,
-            "critic_scheduler": self.critic_scheduler,
+            "actor_optim": actor_optim,
+            "critic_optim": critic_optim,
+            "critic2_optim": critic2_optim,
+            "actor_scheduler": actor_scheduler,
+            "critic_scheduler": critic_scheduler,
+            "critic2_scheduler": critic2_scheduler,
         }
 
     @torch.no_grad()
@@ -163,6 +181,8 @@ class CoLMotionPolicyTrainer():
             tgt.data.lerp_(src.data, tau)
         for tgt, src in zip(self.target_critic.parameters(), self.critic.parameters()):
             tgt.data.lerp_(src.data, tau)
+        for tgt, src in zip(self.target_critic2.parameters(), self.critic2.parameters()):
+            tgt.data.lerp_(src.data, tau)
 
     def _verify_device(self) -> torch.device:
         """
@@ -171,6 +191,8 @@ class CoLMotionPolicyTrainer():
         assert next(self.actor.parameters()).device == next(self.critic.parameters()).device
         assert next(self.actor.parameters()).device == next(self.target_actor.parameters()).device
         assert next(self.actor.parameters()).device == next(self.target_critic.parameters()).device
+        assert next(self.actor.parameters()).device == next(self.critic2.parameters()).device
+        assert next(self.actor.parameters()).device == next(self.target_critic2.parameters()).device
         return next(self.actor.parameters()).device
 
     def setup(self, fabric: Fabric):
@@ -179,12 +201,26 @@ class CoLMotionPolicyTrainer():
         device. Initializes robot and point cloud sampler on current device.
         """
 
+        # torch.nn.Module.compile(self.actor)
+        # torch.nn.Module.compile(self.critic)
+        # torch.nn.Module.compile(self.critic2)
+        # torch.nn.Module.compile(self.target_actor)
+        # torch.nn.Module.compile(self.target_critic)
+        # torch.nn.Module.compile(self.target_critic2)
+
+        # self.critic        = torch.compile(self.critic,        backend="inductor")
+        # self.critic2       = torch.compile(self.critic2,       backend="inductor")
+        # self.target_critic = torch.compile(self.target_critic, backend="inductor")
+        # self.target_critic2= torch.compile(self.target_critic2,backend="inductor")
+
         # fabric setup: wrap trainable modules w/ their optimizers
         self.actor,  self.actor_optim  = fabric.setup(self.actor,  self.actor_optim)
         self.critic, self.critic_optim = fabric.setup(self.critic, self.critic_optim)
+        self.critic2, self.critic2_optim = fabric.setup(self.critic2, self.critic2_optim)
         # target networks have no optimizers
         self.target_actor  = fabric.setup(self.target_actor)
         self.target_critic = fabric.setup(self.target_critic)
+        self.target_critic2 = fabric.setup(self.target_critic2)
 
         self.device = self._verify_device()
         assert str(self.device) != "cpu", "You do not want to train on CPU"
@@ -201,10 +237,12 @@ class CoLMotionPolicyTrainer():
         self.pc_bounds = self.pc_bounds.to(self.device)
         self.actor.train()
         self.critic.train()
+        self.critic2.train()
 
         # never need gradients for target networks
         self.target_actor.eval()
         self.target_critic.eval()
+        self.target_critic2.eval()
 
         # move all metrics to the same device
         for m in [self.val_position_error, self.val_orientation_error,
@@ -278,9 +316,7 @@ class CoLMotionPolicyTrainer():
         # don't backprop into critic
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        # loss_actor = -self.critic(pc_labels, pc, q, a_pred, self.pc_bounds).mean()
-        q1, _ = self.critic(pc_labels, pc, q, a_pred, self.pc_bounds)
-        loss_actor = -q1.mean()
+        loss_actor = -self.critic(pc_labels, pc, q, a_pred, self.pc_bounds).mean()
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return loss_actor
@@ -300,30 +336,41 @@ class CoLMotionPolicyTrainer():
         done   = batch.get("done", torch.zeros_like(r))
 
         # build next state's (s') point cloud by sampling robot at q_next
-        assert self.robot is not None
-        q_next_unn = self.robot.unnormalize_joints(q_next)
-        robot_pc = self._sample(q_next_unn)[..., :3]
-        next_pc = torch.cat([robot_pc, batch["point_cloud"][:, robot_pc.size(1):]], dim=1)
+        timings = {}
+        with section("sample_robot_pc", timings):
+            assert self.robot is not None
+            q_next_unn = self.robot.unnormalize_joints(q_next)
+            robot_pc = self._sample(q_next_unn)[..., :3]
+            # next_pc = batch["point_cloud"].detach().clone()
+            # next_pc[:, : robot_pc.size(1)] = robot_pc
+            next_pc = torch.cat([robot_pc, batch["point_cloud"][:, robot_pc.size(1):]], dim=1)
 
         # target action a' = π'(s')
-        with torch.no_grad():
-            a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
-            if a_next.dim() == 3:
-                a_next = a_next[:, -1, :]
-            # add clipped gaussian target actor noise [TD3]
-            a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
-                                        -self.target_actor_noise_clip,
-                                        self.target_actor_noise_clip)
-            if self.action_clip is not None:
-                a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
+        with section("target_actor_predict", timings):
+            with torch.no_grad():
+                a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
+                if a_next.dim() == 3:
+                    a_next = a_next[:, -1, :]
+                # add clipped gaussian target actor noise [TD3]
+                a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
+                                            -self.target_actor_noise_clip,
+                                            self.target_actor_noise_clip)
+                if self.action_clip is not None:
+                    a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
 
         with torch.no_grad():
-            q_next_target, q_next_target2 = self.target_critic(
-                batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
-            )
-            y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
+            with section("target_critic_predict", timings):
+                q_next_target = self.target_critic(
+                    batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
+                )
+                q_next_target2 = self.target_critic2(
+                    batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
+                )
+                y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
 
-        q_sa, q_sa2 = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        with section("critic_predict", timings):
+            q_sa = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+            q_sa2 = self.critic2(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
         with torch.no_grad():
             metrics["q_target_mean_(y)"] = float(y.mean().item())
             metrics["q_sa_mean"]     = float(q_sa.mean().item())
@@ -356,49 +403,67 @@ class CoLMotionPolicyTrainer():
         :param use_actor_loss: Whether to use the actor loss (else just BC and critic updates)
         :return: A flat dict of scalars for logging
         """
+
         # critic update on one-step TD loss first (keeps actor graph clean)
         metrics = {}
-        loss_q1, loss_q2 = self._critic_loss(batch, metrics)
+        
+        timings = {}
+        with section("critic_loss", timings):
+            loss_q1, loss_q2 = self._critic_loss(batch, metrics)
+        
         metrics.update({
             "critic_loss_1": float(loss_q1.detach().item()),
             "critic_loss_2": float(loss_q2.detach().item()),
         })
-        self.critic_optim.zero_grad(set_to_none=True)
-        fabric.backward(loss_q1 + loss_q2)
-        clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
-        self.critic_optim.step()
-        self.critic_scheduler.step()
+        with section("critic_optim", timings):
+            self.critic_optim.zero_grad(set_to_none=True)
+            self.critic2_optim.zero_grad(set_to_none=True)
+            fabric.backward(loss_q1 + loss_q2)
+            clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
+            clip_grad_norm_(self.critic2.parameters(), max_norm=self.grad_clip_norm)
+            self.critic_optim.step()
+            self.critic2_optim.step()
+            self.critic_scheduler.step()
+            self.critic2_scheduler.step()
 
         # actor predict next q via Δq
-        q = batch["configuration"]
-        pc_labels = batch["point_cloud_labels"]
-        pc = batch["point_cloud"]
-        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
-        a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
-        if self.action_clip is not None:
-            a_pred = torch.clamp(a_pred, -self.action_clip, self.action_clip)
-        q_pred  = torch.clamp(q + a_pred, -1, 1)
+        with section("actor_predict", timings):
+            q = batch["configuration"]
+            pc_labels = batch["point_cloud_labels"]
+            pc = batch["point_cloud"]
+            qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
+            a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
+            if self.action_clip is not None:
+                a_pred = torch.clamp(a_pred, -self.action_clip, self.action_clip)
+            q_pred  = torch.clamp(q + a_pred, -1, 1)
 
-        loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
+        if not torch.isfinite(q_pred).all():
+            raise RuntimeError("Non-finite q_pred after clamp")
+
+        with section("bc_loss", timings):
+            loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
         metrics["point_match_loss"] = float(loss_bc.detach().item())
 
         # actor update on critic-guided actor loss (+ optional BC)
         if use_actor_loss:
-            loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
-            metrics["actor_loss"] = float(loss_actor.detach().item())
-            actor_total = (self.point_match_loss_weight * loss_bc +
-                            self.actor_loss_weight * loss_actor)
+            with section("actor_loss", timings):
+                loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
+                metrics["actor_loss"] = float(loss_actor.detach().item())
+                actor_total = (self.point_match_loss_weight * loss_bc +
+                                self.actor_loss_weight * loss_actor)
         else:
             actor_total = self.point_match_loss_weight * loss_bc
 
-        self.actor_optim.zero_grad(set_to_none=True)
-        fabric.backward(actor_total)
-        clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
-        self.actor_optim.step()
-        self.actor_scheduler.step()
+        with section("actor_optim", timings):
+            self.actor_optim.zero_grad(set_to_none=True)
+            fabric.backward(actor_total)
+            clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
+            self.actor_optim.step()
+            self.actor_scheduler.step()
 
         if update_targets:
-            self._polyak_update(tau=self.tau) # soft target update
+            with section("polyak_update", timings):
+                self._polyak_update(tau=self.tau) # soft target update
 
         metrics["lr"]  = float(self.actor_optim.param_groups[0]["lr"])
 
@@ -878,12 +943,17 @@ class CoLMotionPolicyTrainer():
             if "critic" in ckpt:
                 trainer.critic.load_state_dict(ckpt["critic"], strict=False)
                 loaded_any = True
+            if "critic2" in ckpt:
+                trainer.critic2.load_state_dict(ckpt["critic2"], strict=False)
+                loaded_any = True
             if "target_actor" in ckpt:
                 trainer.target_actor.load_state_dict(ckpt["target_actor"], strict=False)
             else:
                 trainer.target_actor.load_state_dict(trainer.actor.state_dict())
             if "target_critic" in ckpt:
                 trainer.target_critic.load_state_dict(ckpt["target_critic"], strict=False)
+            if "target_critic2" in ckpt:
+                trainer.target_critic2.load_state_dict(ckpt["target_critic2"], strict=False)
 
             if "actor_optim" in ckpt:
                 try:
@@ -895,6 +965,11 @@ class CoLMotionPolicyTrainer():
                     trainer.critic_optim.load_state_dict(ckpt["critic_optim"])  # type: ignore[arg-type]
                 except Exception:
                     pass
+            if "critic2_optim" in ckpt:
+                try:
+                    trainer.critic2_optim.load_state_dict(ckpt["critic2_optim"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
             if "actor_sch" in ckpt:
                 try:
                     trainer.actor_scheduler.load_state_dict(ckpt["actor_sch"])  # type: ignore[arg-type]
@@ -903,6 +978,11 @@ class CoLMotionPolicyTrainer():
             if "critic_sch" in ckpt:
                 try:
                     trainer.critic_scheduler.load_state_dict(ckpt["critic_sch"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if "critic2_sch" in ckpt:
+                try:
+                    trainer.critic2_scheduler.load_state_dict(ckpt["critic2_sch"])  # type: ignore[arg-type]
                 except Exception:
                     pass
 

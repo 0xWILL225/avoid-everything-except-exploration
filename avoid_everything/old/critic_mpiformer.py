@@ -26,9 +26,9 @@ class CriticMPiFormer(nn.Module):
         robot_dof: int,
         *,
         feature_dim: int = 4,
-        n_heads: int = 8,
-        d_model: int = 512,
-        n_layers: int = 4,
+        n_heads: int = 4,
+        d_model: int = 256,
+        n_layers: int = 3,
         dropout: float = 0.1,
     ):
         super().__init__()

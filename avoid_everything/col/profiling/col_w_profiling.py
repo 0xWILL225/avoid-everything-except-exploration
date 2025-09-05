@@ -16,10 +16,12 @@ from robofin.samplers import TorchRobotSampler
 
 from avoid_everything.geometry import TorchCuboids, TorchCylinders
 from avoid_everything.mpiformer import MotionPolicyTransformer
-from avoid_everything.col.twin_critic import TwinCritic
+# from avoid_everything.col.critic_mpiformer import CriticMPiFormer
 from avoid_everything.col.loss import CoLLossFn
 from avoid_everything.col.replay import ReplayBuffer
+from avoid_everything.col.twin_critic import TwinCritic
 
+from avoid_everything.utils.profiling import section
 
 class CoLMotionPolicyTrainer():
     """
@@ -300,30 +302,35 @@ class CoLMotionPolicyTrainer():
         done   = batch.get("done", torch.zeros_like(r))
 
         # build next state's (s') point cloud by sampling robot at q_next
-        assert self.robot is not None
-        q_next_unn = self.robot.unnormalize_joints(q_next)
-        robot_pc = self._sample(q_next_unn)[..., :3]
-        next_pc = torch.cat([robot_pc, batch["point_cloud"][:, robot_pc.size(1):]], dim=1)
+        timings = {}
+        with section("sample_robot_pc", timings):
+            assert self.robot is not None
+            q_next_unn = self.robot.unnormalize_joints(q_next)
+            robot_pc = self._sample(q_next_unn)[..., :3]
+            next_pc = torch.cat([robot_pc, batch["point_cloud"][:, robot_pc.size(1):]], dim=1)
 
         # target action a' = π'(s')
-        with torch.no_grad():
-            a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
-            if a_next.dim() == 3:
-                a_next = a_next[:, -1, :]
-            # add clipped gaussian target actor noise [TD3]
-            a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
-                                        -self.target_actor_noise_clip,
-                                        self.target_actor_noise_clip)
-            if self.action_clip is not None:
-                a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
+        with section("target_actor_predict", timings):
+            with torch.no_grad():
+                a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
+                if a_next.dim() == 3:
+                    a_next = a_next[:, -1, :]
+                # add clipped gaussian target actor noise [TD3]
+                a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
+                                            -self.target_actor_noise_clip,
+                                            self.target_actor_noise_clip)
+                if self.action_clip is not None:
+                    a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
 
         with torch.no_grad():
-            q_next_target, q_next_target2 = self.target_critic(
-                batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
-            )
-            y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
+            with section("target_critic_predict", timings):
+                q_next_target, q_next_target2 = self.target_critic(
+                    batch["point_cloud_labels"], next_pc, q_next, a_next, self.pc_bounds
+                )
+                y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
 
-        q_sa, q_sa2 = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        with section("critic_predict", timings):
+            q_sa, q_sa2 = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
         with torch.no_grad():
             metrics["q_target_mean_(y)"] = float(y.mean().item())
             metrics["q_sa_mean"]     = float(q_sa.mean().item())
@@ -358,47 +365,60 @@ class CoLMotionPolicyTrainer():
         """
         # critic update on one-step TD loss first (keeps actor graph clean)
         metrics = {}
-        loss_q1, loss_q2 = self._critic_loss(batch, metrics)
+        
+        timings = {}
+        with section("critic_loss", timings):
+            loss_q1, loss_q2 = self._critic_loss(batch, metrics)
+        
         metrics.update({
             "critic_loss_1": float(loss_q1.detach().item()),
             "critic_loss_2": float(loss_q2.detach().item()),
         })
-        self.critic_optim.zero_grad(set_to_none=True)
-        fabric.backward(loss_q1 + loss_q2)
-        clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
-        self.critic_optim.step()
-        self.critic_scheduler.step()
+        with section("critic_optim", timings):
+            self.critic_optim.zero_grad(set_to_none=True)
+            fabric.backward(loss_q1 + loss_q2)
+            clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
+            self.critic_optim.step()
+            self.critic_scheduler.step()
 
         # actor predict next q via Δq
-        q = batch["configuration"]
-        pc_labels = batch["point_cloud_labels"]
-        pc = batch["point_cloud"]
-        qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
-        a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
-        if self.action_clip is not None:
-            a_pred = torch.clamp(a_pred, -self.action_clip, self.action_clip)
-        q_pred  = torch.clamp(q + a_pred, -1, 1)
+        with section("actor_predict", timings):
+            q = batch["configuration"]
+            pc_labels = batch["point_cloud_labels"]
+            pc = batch["point_cloud"]
+            qdeltas = self.actor(pc_labels, pc, q, self.pc_bounds)
+            a_pred  = qdeltas[:, -1, :] if qdeltas.dim() == 3 else qdeltas
+            if self.action_clip is not None:
+                a_pred = torch.clamp(a_pred, -self.action_clip, self.action_clip)
+            q_pred  = torch.clamp(q + a_pred, -1, 1)
 
-        loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
+        if not torch.isfinite(q_pred).all():
+            raise RuntimeError("Non-finite q_pred after clamp")
+
+        with section("bc_loss", timings):
+            loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
         metrics["point_match_loss"] = float(loss_bc.detach().item())
 
         # actor update on critic-guided actor loss (+ optional BC)
         if use_actor_loss:
-            loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
-            metrics["actor_loss"] = float(loss_actor.detach().item())
-            actor_total = (self.point_match_loss_weight * loss_bc +
-                            self.actor_loss_weight * loss_actor)
+            with section("actor_loss", timings):
+                loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
+                metrics["actor_loss"] = float(loss_actor.detach().item())
+                actor_total = (self.point_match_loss_weight * loss_bc +
+                                self.actor_loss_weight * loss_actor)
         else:
             actor_total = self.point_match_loss_weight * loss_bc
 
-        self.actor_optim.zero_grad(set_to_none=True)
-        fabric.backward(actor_total)
-        clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
-        self.actor_optim.step()
-        self.actor_scheduler.step()
+        with section("actor_optim", timings):
+            self.actor_optim.zero_grad(set_to_none=True)
+            fabric.backward(actor_total)
+            clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_clip_norm)
+            self.actor_optim.step()
+            self.actor_scheduler.step()
 
         if update_targets:
-            self._polyak_update(tau=self.tau) # soft target update
+            with section("polyak_update", timings):
+                self._polyak_update(tau=self.tau) # soft target update
 
         metrics["lr"]  = float(self.actor_optim.param_groups[0]["lr"])
 
