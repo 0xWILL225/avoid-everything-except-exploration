@@ -13,9 +13,11 @@ actor transitions sampled from a replay sampler. It is designed to:
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import threading
 import queue
+import traceback
 import torch
 
 from avoid_everything.col.replay import ReplayBuffer
+from avoid_everything.utils.profiling import section
 
 
 class AsyncReplay:
@@ -30,25 +32,42 @@ class AsyncReplay:
         device: torch.device | str,
         *,
         prefetch: int = 2,
+        warmup_min: int | None = None,
+        backoff: float = 0.01,           # seconds between retries
     ):
         self._replay = replay
         self._batch_size = int(batch_size)
         self._device = torch.device(device)
         self._q: queue.Queue[dict[str, torch.Tensor]] = queue.Queue(maxsize=prefetch)
         self._stop = threading.Event()
+        self._warmup_min  = int(warmup_min if warmup_min is not None else prefetch * self._batch_size)
+        self._backoff     = float(backoff)
         self._t = threading.Thread(target=self._worker, daemon=True)
         self._t.start()
 
     def _worker(self):
         while not self._stop.is_set():
+            if len(self._replay) < self._warmup_min:
+                self._stop.wait(self._backoff)
+                continue
             try:
                 batch = self._replay.sample(self._batch_size, device=self._device)
                 self._q.put(batch, timeout=0.1)
+                print(f"[AsyncReplay] put batch: {self._q.qsize()}")
             except queue.Full:
                 continue
+            except (AssertionError, ValueError) as e:
+                # “replay underflow” or a bad row while buffer is filling/rotating.
+                # Backoff and retry instead of crashing the thread.
+                print(f"[AsyncReplay] transient sampling error: {e}")
+                self._stop.wait(self._backoff)
+                continue
             except Exception as e:
+                # log but keep the thread alive
                 print(f"AsyncReplay EXCEPTION: {e}")
-                raise e
+                traceback.print_exc()
+                self._stop.wait(self._backoff)
+                continue
 
     def get(self) -> dict[str, torch.Tensor]:
         """Block until a prefetched batch is ready"""
@@ -56,6 +75,12 @@ class AsyncReplay:
 
     def close(self):
         self._stop.set()
+        try:
+            # drain so the thread is not stuck on put()
+            while not self._q.empty():
+                self._q.get_nowait()
+        except Exception:
+            pass
         self._t.join(timeout=1.0)
 
 def _to_tensor(x: Any) -> torch.Tensor:
@@ -279,7 +304,7 @@ class MixedBatchProvider:
             self._ensure_async(n_actor_samples, device)
             actor_batch: Dict[str, torch.Tensor] = {}
             if n_actor_samples > 0:
-                assert self._async is not None, "AsyncReplay should be initialized for actor samples"
+                assert self._async is not None, "AsyncR eplay should be initialized for actor samples"
                 actor_batch = self._async.get()
         else:
             actor_batch  = self._actor_replay.sample(n_actor_samples, device=device) if n_actor_samples > 0 else {}
@@ -291,7 +316,6 @@ class MixedBatchProvider:
 
         common = expert_batch.keys() & actor_batch.keys()
         merged = {k: torch.cat([expert_batch[k], actor_batch[k]], dim=0) for k in common}
-
         
         any_tensor = next(iter(merged.values()))
         perm = torch.randperm(total_batch_size, device=any_tensor.device)
