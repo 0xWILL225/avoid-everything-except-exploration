@@ -60,9 +60,15 @@ class TwinCritic(nn.Module):
     Shared point-cloud encoder -> two independent Q heads (TD3-style).
     Saves ~1x PointNet++ forward per step.
     """
-    def __init__(self, num_robot_points: int, robot_dof: int,
-                 *, feature_dim: int = 4, d_model: int = 256,
-                 n_heads: int = 4, n_layers: int = 3, dropout: float = 0.1):
+    def __init__(self, 
+                 num_robot_points: int, 
+                 robot_dof: int,
+                 *, 
+                 feature_dim: int = 4, 
+                 n_heads: int = 4, # 4
+                 d_model: int = 512, # 256
+                 n_layers: int = 4, # 3
+                 dropout: float = 0.1):
         super().__init__()
         self.pc_encoder = MPiFormerPointNet(num_robot_points, feature_dim, d_model)
         self.q1 = _CriticTrunk(robot_dof, d_model, n_heads, n_layers, dropout)

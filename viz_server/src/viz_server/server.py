@@ -11,13 +11,13 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Union
 
 import fasteners
 import numpy as np
 import rclpy
-import yaml
 import zmq
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
@@ -32,11 +32,57 @@ from urdf_parser_py.urdf import URDF  # should maybe use urchin instead
 from visualization_msgs.msg import Marker, MarkerArray
 
 from robofin.robots import Robot
-from spherification.spherification_utils import convert_mesh_paths_to_absolute
+
 
 LOCK_FILE = "/tmp/viz_server.lock"
 ZMQ_PORT  = 5556
 
+MAX_GHOST_ROBOT_MARKERS = 69
+MAX_OBSTACLES = 40
+
+def convert_mesh_paths_to_absolute(urdf_path, output_path=None):
+    """
+    Convert relative mesh paths in a URDF to absolute file:// paths.
+    Useful for making URDFs compatible with RViz and Foxglove.
+    
+    Args:
+        urdf_path: Path to input URDF file
+        output_path: Path for output URDF (optional, defaults to input path with _absolute suffix)
+    """
+    urdf_path = Path(urdf_path)
+    
+    if output_path is None:
+        output_path = urdf_path.parent / f"{urdf_path.stem}_abs.urdf"
+    
+    print(f"Converting mesh paths to absolute: {urdf_path} -> {output_path}")
+    
+    # Parse URDF
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+    urdf_dir = urdf_path.parent
+    
+    converted_count = 0
+    
+    # Convert mesh paths
+    for mesh in root.findall('.//mesh'):
+        filename = mesh.get('filename')
+        if filename and not filename.startswith('file://'):
+            if filename.startswith('package://'):
+                filename = filename[len('package://'):]
+            
+            abs_path = urdf_dir / filename
+            if abs_path.exists():
+                mesh.set('filename', f'file://{abs_path.absolute()}')
+                converted_count += 1
+            else:
+                print(f"WARNING: Mesh file not found: {abs_path}")
+    
+    tree.write(output_path, encoding='utf-8', xml_declaration=True)
+    
+    print(f"SUCCESS: Converted {converted_count} mesh paths to absolute")
+    print(f"  Output: {output_path}")
+    
+    return output_path
 
 class VizServer(Node):
     """
@@ -305,6 +351,11 @@ class VizServer(Node):
         config: list[float] = hdr["config"]
         color: list[float] = hdr.get("color", [0.0, 1.0, 0.0])
         alpha: float = hdr.get("alpha", 0.5)
+        index: int = hdr.get("index", 0)
+
+        if index >= MAX_GHOST_ROBOT_MARKERS:
+            self.sock.send_json({"status": "error", "msg": f"index {index} is too large"})
+            return
 
         auxiliary_joint_values = {}
         for joint_name in self.robot.auxiliary_joint_names:
@@ -334,6 +385,7 @@ class VizServer(Node):
             x,y,z = squeezed_pose[:3, 3]
 
             m = Marker()
+            m.id = index
             m.header.frame_id = self.robot.base_link_name
             m.header.stamp = self.get_clock().now().to_msg()
             m.ns   = f"ghost_robot_{link_name}"
@@ -357,13 +409,15 @@ class VizServer(Node):
         markers = []
         timestamp = self.get_clock().now().to_msg()
         
-        for link_name in self.robot.eef_visual_link_names:
-            m = Marker()
-            m.header.frame_id = self.robot.base_link_name
-            m.header.stamp = timestamp
-            m.ns = f"ghost_ee_{link_name}"
-            m.action = Marker.DELETEALL
-            markers.append(m)
+        for i in range(MAX_GHOST_ROBOT_MARKERS):
+            for link_name in self.robot.eef_visual_link_names:
+                m = Marker()
+                m.id = i
+                m.header.frame_id = self.robot.base_link_name
+                m.header.stamp = timestamp
+                m.ns = f"ghost_ee_{link_name}"
+                m.action = Marker.DELETEALL
+                markers.append(m)
 
         self.marker_pub.publish(MarkerArray(markers=markers))
         self.sock.send_json({"status": "ok"})
@@ -430,6 +484,10 @@ class VizServer(Node):
                 self.sock.send_json({"status": "error", "msg": "Invalid cuboid parameters"})
                 return
             
+            if obstacle_idx >= MAX_OBSTACLES:
+                self.sock.send_json({"status": "warning", "msg": f"Too many obstacles, more than {MAX_OBSTACLES}"})
+                break
+
             m = Marker()
             m.header.frame_id = self.robot.base_link_name
             m.header.stamp = self.get_clock().now().to_msg()
@@ -458,7 +516,11 @@ class VizServer(Node):
             if len(center) != 3 or len(quat) != 4:
                 self.sock.send_json({"status": "error", "msg": "Invalid cylinder parameters"})
                 return
-            
+
+            if obstacle_idx >= MAX_OBSTACLES:
+                self.sock.send_json({"status": "warning", "msg": f"Too many obstacles, more than {MAX_OBSTACLES}"})
+                break
+
             m = Marker()
             m.header.frame_id = self.robot.base_link_name
             m.header.stamp = self.get_clock().now().to_msg()
@@ -493,7 +555,7 @@ class VizServer(Node):
         markers = []
         timestamp = self.get_clock().now().to_msg()
 
-        for i in range(40): # at most 40 obstacles in Avoid Everything
+        for i in range(MAX_OBSTACLES): # at most 40 obstacles in Avoid Everything
             m = Marker()
             m.header.frame_id = self.robot.base_link_name
             m.header.stamp = timestamp

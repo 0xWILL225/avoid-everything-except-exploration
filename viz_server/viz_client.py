@@ -479,7 +479,8 @@ def publish_ghost_robot(
     auxiliary_joint_values: Optional[Dict[str, float]]=None,
     *,
     color: List[float] | None = None,
-    alpha: float = 0.5
+    alpha: float = 0.5,
+    index: int = 0
 ) -> None:
     """
     Display a translucent mesh of the entire robot at an arbitrary configuration.
@@ -506,10 +507,11 @@ def publish_ghost_robot(
             config = config.squeeze()
         config = config.tolist()
 
-    hdr = {"cmd":"ghost_robot", 
+    hdr = {"cmd":"ghost_robot",
            "config":config, 
            "color":color, 
-           "alpha":alpha}
+           "alpha":alpha,
+           "index":index}
     if auxiliary_joint_values is not None:
         for joint_name, joint_value in auxiliary_joint_values.items():
             hdr[joint_name] = joint_value

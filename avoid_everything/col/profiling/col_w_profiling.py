@@ -16,7 +16,6 @@ from robofin.samplers import TorchRobotSampler
 
 from avoid_everything.geometry import TorchCuboids, TorchCylinders
 from avoid_everything.mpiformer import MotionPolicyTransformer
-# from avoid_everything.col.critic_mpiformer import CriticMPiFormer
 from avoid_everything.col.loss import CoLLossFn
 from avoid_everything.col.replay import ReplayBuffer
 from avoid_everything.col.twin_critic import TwinCritic

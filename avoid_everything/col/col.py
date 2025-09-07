@@ -54,7 +54,8 @@ class CoLMotionPolicyTrainer():
         tau: float,
         grad_clip_norm: float,
         pc_bounds: list[list[float]],
-        rollout_length: int
+        rollout_length: int,
+        visualization: bool
     ):
         self.urdf_path = urdf_path
         self.robot = None
@@ -87,6 +88,7 @@ class CoLMotionPolicyTrainer():
         self.use_huber_loss = use_huber_loss
         self.tau = tau
         self.grad_clip_norm = grad_clip_norm
+        self.visualization = visualization
 
         self.val_position_error = torchmetrics.MeanMetric()
         self.val_orientation_error = torchmetrics.MeanMetric()
