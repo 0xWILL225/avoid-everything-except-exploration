@@ -252,11 +252,10 @@ def run():
         )
 
         batch_idx = 0
-        
+
         for _ in range(n_batches):
             pretraining: bool = global_step < config["pretraining_steps"]
 
-            
             batch, data_loader_iterations = mixed_provider.sample(
                 8 if config["mintest"] else config["train_batch_size"],
                 expert_fraction=config["expert_fraction"],
@@ -266,7 +265,7 @@ def run():
 
             update_targets: bool = global_step % config["actor_delay"] == 0
             use_actor_loss: bool = update_targets and (global_step > config["start_using_actor_loss"])
-            
+
             metrics = trainer.train_step(
                 batch,
                 fabric=fabric,

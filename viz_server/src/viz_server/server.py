@@ -197,7 +197,7 @@ class VizServer(Node):
                     case "ghost_end_effector": self._handle_ghost_end_effector(hdr)
                     case "ghost_robot": self._handle_ghost_robot(hdr)
                     case "clear_ghost_end_effector": self._handle_clear_ghost_end_effector()
-                    case "clear_ghost_robot": self._handle_clear_ghost_robot()
+                    case "clear_ghost_robots": self._handle_clear_ghost_robots()
                     case "obstacles":  self._handle_obstacles(hdr, payload)
                     case "clear_obstacles": self._handle_clear_obstacles()
                     case "shutdown":   self._handle_shutdown()
@@ -422,7 +422,7 @@ class VizServer(Node):
         self.marker_pub.publish(MarkerArray(markers=markers))
         self.sock.send_json({"status": "ok"})
 
-    def _handle_clear_ghost_robot(self) -> None:
+    def _handle_clear_ghost_robots(self) -> None:
         """Clear all ghost robot markers."""
         markers = []
         timestamp = self.get_clock().now().to_msg()

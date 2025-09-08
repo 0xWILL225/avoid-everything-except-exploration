@@ -289,7 +289,7 @@ class MixedBatchProvider:
         n_expert_samples = int(round(total_batch_size * expert_fraction))
         n_actor_samples = total_batch_size - n_expert_samples
 
-        expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else {}
+        expert_batch, data_loader_iterations = self._pop_expert(n_expert_samples) if n_expert_samples > 0 else ({}, 0)
 
         # choose a target device based on expert batch (if present)
         if device is None:

@@ -6,6 +6,7 @@ training the CoL motion policy.
 from typing import Tuple, Callable, Dict
 from lightning import Fabric
 
+import numpy as np
 import torch
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
@@ -19,6 +20,8 @@ from avoid_everything.mpiformer import MotionPolicyTransformer
 from avoid_everything.col.twin_critic import TwinCritic
 from avoid_everything.col.loss import CoLLossFn
 from avoid_everything.col.replay import ReplayBuffer
+from avoid_everything.utils.visualization import visualize_rollout_rewards
+from avoid_everything.utils.visualization import visualize_sample_with_value
 
 
 class CoLMotionPolicyTrainer():
@@ -122,6 +125,26 @@ class CoLMotionPolicyTrainer():
         self.critic_optim: torch.optim.Optimizer
         self.actor_scheduler: torch.optim.lr_scheduler.LambdaLR
         self.critic_scheduler: torch.optim.lr_scheduler.LambdaLR
+
+        def return_bounds(gamma, step_reward, goal_reward, collision_reward, horizon):
+            t = np.arange(horizon)
+            geom = (1.0 - gamma**t) / (1.0 - gamma)  # sum_{i=0}^{t-1} gamma^i
+            step_sums = step_reward * geom
+            goal_returns = step_sums + (gamma**t) * goal_reward      # terminate with goal at t
+            coll_returns = step_sums + (gamma**t) * collision_reward # terminate with collision at t
+            no_term = step_reward * ((1.0 - gamma**horizon) / (1.0 - gamma)) # no termination
+
+            max_ret = max(goal_returns.max(), no_term)
+            min_ret = min(coll_returns.min(), no_term)
+            return float(min_ret), float(max_ret)
+
+        self.min_cumulative_reward, self.max_cumulative_reward = return_bounds(
+            self.gamma,
+            self.step_reward,
+            self.goal_reward,
+            self.collision_reward,
+            self.rollout_length,
+        )
 
     def configure_optimizers(self):
         """
@@ -325,7 +348,20 @@ class CoLMotionPolicyTrainer():
             )
             y = r + self.gamma * (1.0 - done) * torch.min(q_next_target, q_next_target2)
 
-        q_sa, q_sa2 = self.critic(batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+        q_sa, q_sa2 = self.critic(
+            batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
+
+        # visualize randomly selected target actor state transition and Q-values from first critic
+        if self.visualization:
+            index = torch.randint(0, batch["configuration"].size(0), (1,))
+            visualize_sample_with_value(
+                self.robot,
+                {k: v[index] for k, v in batch.items()},
+                q_sa[index],
+                self.min_cumulative_reward,
+                self.max_cumulative_reward,
+            )
+
         with torch.no_grad():
             metrics["q_target_mean_(y)"] = float(y.mean().item())
             metrics["q_sa_mean"]     = float(q_sa.mean().item())
@@ -442,14 +478,24 @@ class CoLMotionPolicyTrainer():
 
         active = torch.ones(B, dtype=torch.bool, device=q.device)
         assert self.robot is not None
-        for _ in range(self.rollout_length):
-            if not active.any(): break
+        if self.visualization:
+            viz_rollout_idx = torch.randint(0, B, (1,))
+            viz_sample = {k: v[viz_rollout_idx] for k, v in batch.items()}
+            viz_rollout_q_nexts = torch.zeros(
+                (self.rollout_length, self.robot.MAIN_DOF), device=q.device, requires_grad=False)
+            viz_rollout_rewards = torch.zeros(
+                (self.rollout_length,), device=q.device, requires_grad=False)
+            viz_rollout_length = 0
+
+        for i in range(self.rollout_length):
+            if not active.any():
+                break
 
             # actor action for active rows
             q_act = q[active]
             pc_act = pc[active]
             lbl_act = labels[active]
-            qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [b, 1, DOF] or [b, DOF]
+            qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [B, 1, DOF] or [B, DOF]
             a = (qdeltas[:, -1, :] if qdeltas.dim()==3 else qdeltas)
             a = a + torch.randn_like(a) * self.exploration_noise
             if self.action_clip is not None:
@@ -477,6 +523,11 @@ class CoLMotionPolicyTrainer():
                 done=done.unsqueeze(1),
             )
 
+            if self.visualization and active[viz_rollout_idx]:
+                viz_rollout_q_nexts[i] = q_next[viz_rollout_idx]
+                viz_rollout_rewards[i] = r_t[viz_rollout_idx]
+                viz_rollout_length += 1
+
             # accumulate rewards for active episodes
             cumulative_rewards[active] += r_t.squeeze(1)
             transitions_collected += int(active.sum().item())
@@ -484,7 +535,7 @@ class CoLMotionPolicyTrainer():
             # update only those still active
             still = ~done
             if still.any():
-                samples = self._sample(q_next_unn[still])[..., :3] # [b_still, Nrobot, 3]
+                samples = self._sample(q_next_unn[still])[..., :3] # [B_still, num_robot_points, 3]
                 pc_act[still, :samples.size(1)] = samples
                 q_act[still] = q_next[still]
 
@@ -495,6 +546,18 @@ class CoLMotionPolicyTrainer():
             # mark finished rows inactive
             tmp = active.nonzero(as_tuple=False).squeeze(1)
             active[tmp] = still
+
+        # visualize randomly selected rollout from the batch, with rewards
+        if self.visualization:
+            i = torch.randint(0, B, (1,))
+            visualize_rollout_rewards(
+                self.robot,
+                viz_sample,
+                viz_rollout_q_nexts[:viz_rollout_length],
+                viz_rollout_rewards[:viz_rollout_length],
+                self.goal_reward,
+                self.collision_reward
+            )
 
         # average reward per episode across batch
         avg_episode_reward = float(cumulative_rewards.mean().item())

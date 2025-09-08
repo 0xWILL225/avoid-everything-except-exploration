@@ -58,6 +58,13 @@ class ReplayBuffer:
         """
         Add a transition to the replay buffer. Expects tensors on GPU or CPU; 
         moves them to CPU pinned asynchronously
+
+        :param idx: [B]
+        :param q: [B, DOF], in normalized configuration space ([-1, 1])
+        :param a: [B, DOF], in normalized configuration space
+        :param q_next: [B, DOF], in normalized configuration space
+        :param r: [B, 1]
+        :param done: [B, 1]
         """
         idx    = idx.to(dtype=torch.int64)
         q      = q.to(dtype=torch.float16)

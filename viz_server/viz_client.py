@@ -43,7 +43,6 @@ def _server_alive() -> bool:
     except Exception:   # noqa: BLE001
         return False
 
-
 def connect(urdf: str, *, port: int = 5556) -> None:
     """
     Ensure viz_server is running and obtain a REQ socket.
@@ -113,6 +112,9 @@ def connect(urdf: str, *, port: int = 5556) -> None:
     _sock.connect(f"tcp://127.0.0.1:{PORT}")
     _connected = True; cprint("Connected to viz_server", "green")
 
+
+def is_connected() -> bool:
+    return _connected
 
 # ====================================================================== #
 # Low-level send helper
@@ -517,6 +519,33 @@ def publish_ghost_robot(
             hdr[joint_name] = joint_value
     _send(hdr)
 
+def publish_ghost_robot_trajectory(
+    configs: np.ndarray | torch.Tensor,
+    auxiliary_joint_values: Optional[Dict[str, float]]=None,
+    *,
+    color: List[float] | None = None,
+    alpha: float = 0.5,
+) -> None:
+    """
+    Display a translucent mesh of the entire robot at all the configuration 
+    waypoints of a trajectory (no animation).
+    
+    This shows all robot links with visual geometry using forward kinematics
+    to compute the pose of each link based on the given joint configurations.
+    
+    Parameters
+    ----------
+    configs (np.ndarray | torch.Tensor): Configurations of main joints [N, MAIN_DOF]
+    auxiliary_joint_values (Dict[str, float]): Auxiliary joint values (optional)
+    color : List[float] | None
+        [r, g, b] color values in 0-1 range (default green)
+    alpha : float
+        Alpha/transparency value in 0-1 range (0=transparent, 1=opaque)
+    """
+    assert configs.ndim == 2
+    assert configs.shape[0] > 1
+    for i in range(configs.shape[0]):
+        publish_ghost_robot(configs[i], auxiliary_joint_values, color=color, alpha=alpha, index=i)
 
 def clear_ghost_end_effector() -> None:
     """
@@ -528,14 +557,14 @@ def clear_ghost_end_effector() -> None:
     _send({"cmd":"clear_ghost_end_effector"})
 
 
-def clear_ghost_robot() -> None:
+def clear_ghost_robots() -> None:
     """
     Clear all ghost robot markers from RViz.
     
     This removes all translucent robot meshes that were previously
     published with publish_ghost_robot().
     """
-    _send({"cmd":"clear_ghost_robot"})
+    _send({"cmd":"clear_ghost_robots"})
 
 
 def publish_obstacles(cuboid_dims,
