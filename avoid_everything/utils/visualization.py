@@ -86,10 +86,12 @@ def reward_color(
 def value_color(
     value: torch.Tensor | float, 
     min_cumulative_reward: float, 
-    max_cumulative_reward: float):
+    max_cumulative_reward: float) -> list[float]:
     """
     Color-code a Q-value or cumulative reward
     """
+    if isinstance(value, torch.Tensor):
+        value = value.item()
     denom = max_cumulative_reward - min_cumulative_reward
     assert denom != 0, "visualize_sample_with_value(): Lerp denominator is 0"
     lerp = (value - min_cumulative_reward) / denom
@@ -142,8 +144,8 @@ def visualize_sample_with_value(
         value, min_cumulative_reward, max_cumulative_reward)
 
     viz_client.publish_ghost_robot(
-        robot.unnormalize_joints(sample["next_configuration"]), 
-        color=color, 
+        robot.unnormalize_joints(sample["next_configuration"]),
+        color=color,
         alpha=robot_alpha)
 
 def visualize_rollout_rewards(
@@ -171,7 +173,7 @@ def visualize_rollout_rewards(
         color = reward_color(
             rewards[i], goal_reward, collision_reward)
         viz_client.publish_ghost_robot(
-            rollout[i],
+            robot.unnormalize_joints(rollout[i]),
             color=color,
             alpha=robot_alpha,
             index=i
@@ -203,7 +205,7 @@ def visualize_rollout_values(
             values[i], min_cumulative_reward, max_cumulative_reward)
 
         viz_client.publish_ghost_robot(
-            rollout[i],
+            robot.unnormalize_joints(rollout[i]),
             color=color,
             alpha=robot_alpha,
             index=i
