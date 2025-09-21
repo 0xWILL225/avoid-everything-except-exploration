@@ -16,8 +16,7 @@ import queue
 import traceback
 import torch
 
-from avoid_everything.col.replay import ReplayBuffer
-from avoid_everything.utils.profiling import section
+from avoid_everything_except_exploration.replay import ReplayBuffer
 
 
 class AsyncReplay:
@@ -53,18 +52,18 @@ class AsyncReplay:
             try:
                 batch = self._replay.sample(self._batch_size, device=self._device)
                 self._q.put(batch, timeout=0.1)
-                print(f"[AsyncReplay] put batch: {self._q.qsize()}")
+                # print(f"[AsyncReplay] put batch: {self._q.qsize()}")
             except queue.Full:
                 continue
             except (AssertionError, ValueError) as e:
                 # “replay underflow” or a bad row while buffer is filling/rotating.
                 # Backoff and retry instead of crashing the thread.
-                print(f"[AsyncReplay] transient sampling error: {e}")
+                # print(f"[AsyncReplay] transient sampling error: {e}")
                 self._stop.wait(self._backoff)
                 continue
             except Exception as e:
                 # log but keep the thread alive
-                print(f"AsyncReplay EXCEPTION: {e}")
+                # print(f"AsyncReplay EXCEPTION: {e}")
                 traceback.print_exc()
                 self._stop.wait(self._backoff)
                 continue

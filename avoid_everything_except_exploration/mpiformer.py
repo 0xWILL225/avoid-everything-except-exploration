@@ -28,7 +28,7 @@ from torch_geometric.nn import MLP, PointNetConv, fps, radius
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 from torch_geometric.utils import to_dense_batch
 
-from avoid_everything.transformer import (
+from avoid_everything_except_exploration.transformer import (
     Encoder,
     FeedForward,
     MultiHeadAttention,

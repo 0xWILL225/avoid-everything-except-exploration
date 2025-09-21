@@ -7,8 +7,8 @@ import yaml
 from tqdm.auto import tqdm
 from lightning.fabric import Fabric
 
-from avoid_everything.data_loader import DataModule
-from avoid_everything.col.col import CoLMotionPolicyTrainer
+from avoid_everything_except_exploration.data_loader import DataModule
+from avoid_everything_except_exploration.col import CoLMotionPolicyTrainer
 
 torch.set_default_dtype(torch.float32)
 torch.set_float32_matmul_precision("high")

@@ -81,7 +81,8 @@ max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb
 load_model_from_checkpoint: false
+load_actor_only: true
 load_checkpoint_path: PATH/TO/PRETRAINING/CHECKPOINT
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Superserver: Avoid Everything Except Exploration"
+experiment_name: "CoL: Avoid Everything Except Exploration"
 description: "CoL test run"

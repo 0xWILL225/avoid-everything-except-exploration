@@ -181,7 +181,6 @@ def visualize_rollout_rewards(
 
 def visualize_rollout_values(
     robot: Robot,
-    sample: dict[str, torch.Tensor],
     rollout: torch.Tensor,
     values: torch.Tensor,
     max_cumulative_reward: float,
@@ -199,7 +198,6 @@ def visualize_rollout_values(
         Rewards for each step in the rollout [N] (values from ["reward"])
     """
 
-    visualize_problem(robot, sample)
     for i in range(rollout.shape[0]):
         color = value_color(
             values[i], min_cumulative_reward, max_cumulative_reward)

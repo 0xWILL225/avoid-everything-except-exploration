@@ -20,6 +20,10 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# ------------------------------------------------------------------------------
+# Config file for smaller-scale testing on single-GPU desktop machine.
+# ------------------------------------------------------------------------------
+
 training_model_parameters:
   robot_dof: 7  # robot's degrees of freedom
   point_match_loss_weight: 1.0  # point match loss (BC loss) weight for actor
@@ -80,7 +84,8 @@ max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: false                        # true: log to wandb
 load_model_from_checkpoint: false
+load_actor_only: true
 load_checkpoint_path: PATH/TO/PRETRAINING/CHECKPOINT
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Cretin: Avoid Everything Except Exploration"
-description: "Full CoL"
+experiment_name: "CoL test: Avoid Everything Except Exploration"
+description: "CoL test run"

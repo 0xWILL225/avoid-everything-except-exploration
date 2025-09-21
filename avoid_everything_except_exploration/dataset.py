@@ -12,7 +12,7 @@ from geometrout.primitive import Cuboid, CuboidArray, Cylinder, CylinderArray
 from geometrout.transform import SE3
 
 from robofin.robots import Robot
-from avoid_everything.type_defs import PlanningProblem
+from avoid_everything_except_exploration.type_defs import PlanningProblem
 
 
 def chunk_indices(indices: np.ndarray, chunk_size: int) -> list[np.ndarray]:

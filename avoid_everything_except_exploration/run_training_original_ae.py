@@ -42,13 +42,13 @@ import numpy as np
 import torch
 import yaml
 
-from avoid_everything.col.col import CoLMotionPolicyTrainer
-from avoid_everything.data_loader import DataModule
-from avoid_everything.col.mixed_batch_provider import MixedBatchProvider
-from avoid_everything.col.replay import ReplayBuffer
+from avoid_everything_except_exploration.col import CoLMotionPolicyTrainer
+from avoid_everything_except_exploration.data_loader import DataModule
+from avoid_everything_except_exploration.mixed_batch_provider import MixedBatchProvider
+from avoid_everything_except_exploration.replay import ReplayBuffer
 
 # from avoid_everything.loss import CollisionAndBCLossFn
-from avoid_everything.col.loss import CoLLossFn
+from avoid_everything_except_exploration.loss import CoLLossFn
 
 
 torch.set_default_dtype(torch.float32)

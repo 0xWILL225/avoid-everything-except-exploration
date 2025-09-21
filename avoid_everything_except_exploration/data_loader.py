@@ -31,9 +31,9 @@ from torch.utils.data import DataLoader, Dataset
 from robofin.robots import Robot
 from robofin.samplers import NumpyRobotSampler
 
-from avoid_everything.dataset import Dataset as MPNDataset
-from avoid_everything.geometry import construct_mixed_point_cloud
-from avoid_everything.type_defs import DatasetType
+from avoid_everything_except_exploration.dataset import Dataset as MPNDataset
+from avoid_everything_except_exploration.geometry import construct_mixed_point_cloud
+from avoid_everything_except_exploration.type_defs import DatasetType
 
 class Base(Dataset):
     """

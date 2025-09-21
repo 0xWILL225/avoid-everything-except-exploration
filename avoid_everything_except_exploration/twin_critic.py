@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from avoid_everything.mpiformer import (
+from avoid_everything_except_exploration.mpiformer import (
     MPiFormerPointNet,
     Encoder, TransformerLayer, MultiHeadAttention, FeedForward,
     PositionEncoding3D,

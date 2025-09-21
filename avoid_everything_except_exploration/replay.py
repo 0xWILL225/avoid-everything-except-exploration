@@ -3,7 +3,7 @@ import torch
 
 from robofin.robots import Robot
 from robofin.samplers import TorchRobotSampler
-from avoid_everything.data_loader import Base
+from avoid_everything_except_exploration.data_loader import Base
 
 
 class ReplayBuffer:

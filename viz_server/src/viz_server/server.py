@@ -20,7 +20,7 @@ import numpy as np
 import rclpy
 import zmq
 from rclpy.node import Node
-from rclpy.qos import QoSProfile
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
@@ -30,6 +30,7 @@ from tf2_ros import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 from urdf_parser_py.urdf import URDF  # should maybe use urchin instead
 from visualization_msgs.msg import Marker, MarkerArray
+import yaml
 
 from robofin.robots import Robot
 
@@ -129,14 +130,33 @@ class VizServer(Node):
         # ------------------------------------------------------------------ #
         # ROS publishers
         # ------------------------------------------------------------------ #
-        qos = QoSProfile(depth=1)
-        self.js_pub     = self.create_publisher(JointState,   "/joint_states",  qos)
-        self.marker_pub = self.create_publisher(MarkerArray,  "/viz/markers",   qos)
+        # Use more robust QoS to avoid drops under bursty publishing
+        js_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        marker_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=20,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # latch last marker state
+        )
+        pc_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+        self.js_pub     = self.create_publisher(JointState,   "/joint_states",  js_qos)
+        self.marker_pub = self.create_publisher(MarkerArray,  "/viz/markers",   marker_qos)
 
         # Multiple point cloud publishers for different types
-        self.pc_robot_pub    = self.create_publisher(PointCloud2, "/viz/robot_points",    qos)
-        self.pc_target_pub   = self.create_publisher(PointCloud2, "/viz/target_points",   qos)
-        self.pc_obstacle_pub = self.create_publisher(PointCloud2, "/viz/obstacle_points", qos)
+        self.pc_robot_pub    = self.create_publisher(PointCloud2, "/viz/robot_points",    pc_qos)
+        self.pc_target_pub   = self.create_publisher(PointCloud2, "/viz/target_points",   pc_qos)
+        self.pc_obstacle_pub = self.create_publisher(PointCloud2, "/viz/obstacle_points", pc_qos)
 
         # Static transform broadcaster for world frame
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
@@ -151,18 +171,9 @@ class VizServer(Node):
         # ------------------------------------------------------------------ #
         
         cprint("Starting robot_state_publisher...", "green")
-        xml = Path(self.abs_urdf_path).read_text()
-
-        self.rsp_proc = subprocess.Popen(
-            [
-                "ros2", "run", "robot_state_publisher", "robot_state_publisher",
-                "--ros-args", "-p", f"robot_description:={xml}"
-            ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        
-        # Wait a bit for robot_state_publisher to start, then publish neutral state
-        threading.Thread(target=self._publish_neutral_state, daemon=True).start()
+        self._start_robot_state_publisher()
+        # Keep robot_state_publisher alive in the background
+        threading.Thread(target=self._rsp_watchdog, daemon=True).start()
         
         # Publish static transform from world to base link
         self._publish_world_to_base_transform()
@@ -211,24 +222,32 @@ class VizServer(Node):
     # ====================================================================== #
     def _handle_joints(self, hdr: Dict) -> None:
         """Publish one JointState message."""
-        self._publish_joints(hdr["joints"])
-        self.sock.send_json({"status": "ok"})
+        try:
+            self._publish_joints(hdr["joints"])
+            self.sock.send_json({"status": "ok"})
+        except Exception as e:
+            self.sock.send_json({"status": "error", "msg": f"joints: {e}"})
 
     def _handle_config(self, hdr: Dict) -> None:
         """
         Publish one JointState message, based on main joint config vector. 
         Auxiliary joints take default values.
         """
-        config = hdr["config"]
-        joints = dict(zip(self.robot.main_joint_names, config))
-        for joint_name, joint_value in self.robot.auxiliary_joint_defaults.items():
-            joints[joint_name] = joint_value
+        try:
+            config = hdr["config"]
+            joints = dict(zip(self.robot.main_joint_names, config))
+            for joint_name, joint_value in self.robot.auxiliary_joint_defaults.items():
+                joints[joint_name] = joint_value
 
-        self._publish_joints(joints)
-        self.sock.send_json({"status": "ok"})
+            self._publish_joints(joints)
+            self.sock.send_json({"status": "ok"})
+        except Exception as e:
+            self.sock.send_json({"status": "error", "msg": f"config: {e}"})
 
     def _publish_joints(self, joints: Dict[str, float]) -> None:
         """Publish joint state without ZMQ response (for internal use)."""
+        # Ensure robot_state_publisher is alive; restart if needed
+        self._ensure_robot_state_publisher()
         resolved_joints = self._resolve_mimic_joints(joints)
         
         js               = JointState()
@@ -236,6 +255,89 @@ class VizServer(Node):
         js.name          = self.joint_names
         js.position      = [resolved_joints[n] for n in self.joint_names]
         self.js_pub.publish(js)
+
+    # ------------------------------------------------------------------ #
+    # robot_state_publisher management
+    # ------------------------------------------------------------------ #
+    def _is_robot_state_publisher_alive(self) -> bool:
+        try:
+            return hasattr(self, 'rsp_proc') and self.rsp_proc is not None and self.rsp_proc.poll() is None
+        except Exception:
+            return False
+
+    def _start_robot_state_publisher(self) -> None:
+        """Start robot_state_publisher if it isn't running."""
+        if self._is_robot_state_publisher_alive():
+            return
+
+        try:
+            xml = Path(self.abs_urdf_path).read_text()
+        except Exception as e:
+            cprint(f"Failed reading URDF XML for robot_state_publisher: {e}", "red")
+            return
+
+        # Write params file to avoid huge/quoted CLI args
+        try:
+            params = {
+                "robot_state_publisher": {
+                    "ros__parameters": {
+                        "robot_description": xml
+                    }
+                }
+            }
+            params_path = Path("/tmp/rsp_params.yaml")
+            with open(params_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(params, f, default_flow_style=False, allow_unicode=True)
+        except Exception as e:
+            cprint(f"Failed writing params file for robot_state_publisher: {e}", "red")
+            return
+
+        try:
+            # Source ROS before launching to ensure 'ros2' is on PATH
+            cmd = (
+                "source /opt/ros/humble/setup.bash && "
+                f"ros2 run robot_state_publisher robot_state_publisher --ros-args --params-file {params_path}"
+            )
+            log_path = Path("/tmp/robot_state_publisher.log")
+            log_file = open(log_path, "ab", buffering=0)
+            self.rsp_proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                shell=True,
+                executable="/bin/bash"
+            )
+
+            # Give it a moment and check if it died immediately
+            time.sleep(0.5)
+            if self.rsp_proc.poll() is not None:
+                cprint("robot_state_publisher failed to start", "red")
+                try:
+                    tail = Path("/tmp/robot_state_publisher.log").read_bytes()[-4000:]
+                    cprint(tail.decode(errors="ignore"), "yellow")
+                except Exception:
+                    pass
+                self.rsp_proc = None
+                return
+
+            # Publish a neutral state shortly after startup so RSP has data
+            threading.Thread(target=self._publish_neutral_state, daemon=True).start()
+        except Exception as e:
+            cprint(f"Failed to start robot_state_publisher: {e}", "red")
+
+    def _ensure_robot_state_publisher(self) -> None:
+        """Ensure robot_state_publisher is running; restart if it died."""
+        if not self._is_robot_state_publisher_alive():
+            cprint("robot_state_publisher not running — restarting…", "yellow")
+            self._start_robot_state_publisher()
+
+    def _rsp_watchdog(self) -> None:
+        """Background watchdog that restarts robot_state_publisher if it dies."""
+        while rclpy.ok():
+            if not self._is_robot_state_publisher_alive():
+                cprint("[watchdog] robot_state_publisher down — attempting restart", "yellow")
+                self._start_robot_state_publisher()
+            time.sleep(1.0)
 
     def _handle_trajectory(self, hdr: Dict) -> None:
         """Launch background interpolation thread."""
@@ -736,8 +838,7 @@ class VizServer(Node):
         if set(resolved) != set(self.joint_names):
             missing = set(self.joint_names) - set(resolved)
             extra = set(resolved) - set(self.joint_names)
-            error_msg = f"joint set mismatch after mimic resolution. Missing: {missing}, Extra: {extra}"
-            self.sock.send_json({"status": "error", "msg": error_msg})
+            raise ValueError(f"joint set mismatch after mimic resolution. Missing: {missing}, Extra: {extra}")
 
         return resolved
 

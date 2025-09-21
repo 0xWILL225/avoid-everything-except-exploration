@@ -42,10 +42,10 @@ import numpy as np
 import torch
 import yaml
 
-from avoid_everything.col.col import CoLMotionPolicyTrainer
-from avoid_everything.data_loader import DataModule
-from avoid_everything.col.mixed_batch_provider import MixedBatchProvider
-from avoid_everything.col.replay import ReplayBuffer
+from avoid_everything_except_exploration.col import CoLMotionPolicyTrainer
+from avoid_everything_except_exploration.data_loader import DataModule
+from avoid_everything_except_exploration.mixed_batch_provider import MixedBatchProvider
+from avoid_everything_except_exploration.replay import ReplayBuffer
 
 
 torch.set_default_dtype(torch.float32)
@@ -154,6 +154,7 @@ def run():
             config["load_checkpoint_path"],
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
+            actor_only=config["load_actor_only"],
         )
     else:
         trainer = CoLMotionPolicyTrainer(

@@ -24,6 +24,7 @@ _ctx        = zmq.Context.instance()
 _sock: zmq.Socket[Any] | None = None
 _connected  = False
 _base_link_name: str = "base_link"  # Default, will be loaded from config
+_last_urdf: Optional[str] = None
 
 
 # ====================================================================== #
@@ -54,8 +55,9 @@ def connect(urdf: str, *, port: int = 5556) -> None:
     port : int, default 5556
         ZeroMQ port to connect to.
     """
-    global _sock, _connected, PORT, _base_link_name
+    global _sock, _connected, PORT, _base_link_name, _last_urdf
     PORT = port
+    _last_urdf = urdf
 
     # Check if robot_config.yaml exists before starting server
     urdf_dir = Path(urdf).parent
@@ -111,6 +113,20 @@ def connect(urdf: str, *, port: int = 5556) -> None:
     assert _sock is not None
     _sock.connect(f"tcp://127.0.0.1:{PORT}")
     _connected = True; cprint("Connected to viz_server", "green")
+def _reconnect() -> None:
+    global _sock, _connected, _last_urdf
+    try:
+        if _sock is not None:
+            _sock.close(0)
+    except Exception:
+        pass
+    _connected = False
+    if _last_urdf is None:
+        raise RuntimeError("No previous URDF path to reconnect with. Call connect() first.")
+    # Small backoff
+    time.sleep(0.2)
+    connect(_last_urdf)
+
 
 
 def is_connected() -> bool:
@@ -122,19 +138,25 @@ def is_connected() -> bool:
 def _send(hdr: dict, payload: bytes | None = None) -> None:
     if not _connected or _sock is None:
         raise RuntimeError("Call viz_client.connect() first")
-    if payload is None:
-        _sock.send_json(hdr)
-    else:
-        _sock.send_json(hdr, zmq.SNDMORE)
-        _sock.send(payload, copy=False)
-    resp = _sock.recv_json()
-    if not isinstance(resp, dict) or resp.get("status") != "ok":
-        if isinstance(resp, dict):
-            msg = resp.get("msg", "unknown error") 
-            cprint(f"Server error: {msg}", "red")
+    def _do_send():
+        if payload is None:
+            _sock.send_json(hdr)
         else:
-            msg = str(resp)
-            cprint(f"Server unknown non-ok response: {msg}", "red")
+            _sock.send_json(hdr, zmq.SNDMORE)
+            _sock.send(payload, copy=False)
+        return _sock.recv_json()
+
+    try:
+        resp = _do_send()
+    except Exception as e:
+        cprint(f"ZMQ send/recv failed: {e}; attempting reconnect", "yellow")
+        _reconnect()
+        resp = _do_send()
+
+    if not isinstance(resp, dict) or resp.get("status") != "ok":
+        msg = resp.get("msg", str(resp)) if isinstance(resp, dict) else str(resp)
+        cprint(f"Server error: {msg}", "red")
+        raise RuntimeError(msg)
         
 
 

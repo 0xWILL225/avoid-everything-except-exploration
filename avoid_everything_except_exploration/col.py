@@ -15,13 +15,12 @@ import torchmetrics
 from robofin.robots import Robot
 from robofin.samplers import TorchRobotSampler
 
-from avoid_everything.geometry import TorchCuboids, TorchCylinders
-from avoid_everything.mpiformer import MotionPolicyTransformer
-from avoid_everything.col.twin_critic import TwinCritic
-from avoid_everything.col.loss import CoLLossFn
-from avoid_everything.col.replay import ReplayBuffer
-from avoid_everything.utils.visualization import visualize_rollout_rewards, visualize_rollout_values
-from avoid_everything.utils.visualization import visualize_sample_with_value
+from avoid_everything_except_exploration.geometry import TorchCuboids, TorchCylinders
+from avoid_everything_except_exploration.mpiformer import MotionPolicyTransformer
+from avoid_everything_except_exploration.twin_critic import TwinCritic
+from avoid_everything_except_exploration.loss import CoLLossFn
+from avoid_everything_except_exploration.replay import ReplayBuffer
+from avoid_everything_except_exploration.utils.visualization import visualize_rollout_rewards, visualize_rollout_values
 
 
 class CoLMotionPolicyTrainer():
@@ -58,7 +57,6 @@ class CoLMotionPolicyTrainer():
         grad_clip_norm: float,
         pc_bounds: list[list[float]],
         rollout_length: int,
-        visualization: bool
     ):
         self.urdf_path = urdf_path
         self.robot = None
@@ -91,7 +89,6 @@ class CoLMotionPolicyTrainer():
         self.use_huber_loss = use_huber_loss
         self.tau = tau
         self.grad_clip_norm = grad_clip_norm
-        self.visualization = visualization
 
         self.val_position_error = torchmetrics.MeanMetric()
         self.val_orientation_error = torchmetrics.MeanMetric()
@@ -349,17 +346,6 @@ class CoLMotionPolicyTrainer():
 
         q_sa, q_sa2 = self.critic(
             batch["point_cloud_labels"], batch["point_cloud"], q, a, self.pc_bounds)
-
-        # visualize randomly selected target actor state transition and Q-values from first critic
-        if self.visualization:
-            index = torch.randint(0, batch["configuration"].size(0), (1,))
-            visualize_sample_with_value(
-                self.robot,
-                {k: v[index] for k, v in batch.items()},
-                q_sa[index],
-                self.min_cumulative_reward,
-                self.max_cumulative_reward,
-            )
 
         with torch.no_grad():
             metrics["q_target_mean_(y)"] = float(y.mean().item())
@@ -868,6 +854,7 @@ class CoLMotionPolicyTrainer():
     def rollout_value_visualization(
         self,
         batch: dict[str, torch.Tensor],
+        index: int | None = None,
     ) -> None:
         """
         Rollout the actor policy and visualize the state transition values 
@@ -886,12 +873,14 @@ class CoLMotionPolicyTrainer():
         active = torch.ones(B, dtype=torch.bool, device=q.device)
         assert self.robot is not None
         
-        viz_rollout_idx = torch.randint(0, B, (1,))
-        viz_sample = {k: v[viz_rollout_idx] for k, v in batch.items()}
+        if index is not None:
+            viz_idx = index
+        else:
+            viz_idx = int(torch.randint(0, B, ()).item())
+        
+        # viz_sample = {k: v[viz_idx] for k, v in batch.items()}
         viz_rollout_q_nexts = torch.zeros(
             (self.rollout_length, self.robot.MAIN_DOF), device=q.device, requires_grad=False)
-        # viz_rollout_rewards = torch.zeros(
-        #     (self.rollout_length,), device=q.device, requires_grad=False)
         viz_rollout_values = torch.zeros(
             (self.rollout_length,), device=q.device, requires_grad=False)
         viz_rollout_length = 0
@@ -920,17 +909,13 @@ class CoLMotionPolicyTrainer():
             collided = self._check_for_collisions(
                 q_next_unn, cuboids[active], cylinders[active])
             done = reached | collided
-            # r_t = torch.where(collided, self.collision_reward,
-            #     torch.where(reached, self.goal_reward, self.step_reward)).float().unsqueeze(1)
 
             q1, _ = self.critic(lbl_act, pc_act, q_act, a, self.pc_bounds)
 
             # map original batch index to compressed active indices
-            viz_idx = int(viz_rollout_idx.item())
             if bool(active[viz_idx].item()):
                 vi = int(active[:viz_idx].sum().item())
                 viz_rollout_q_nexts[i] = q_next[vi]
-                # viz_rollout_rewards[i] = r_t[vi, 0]
                 viz_rollout_values[i] = q1[vi, 0]
                 viz_rollout_length += 1
             else:
@@ -954,20 +939,105 @@ class CoLMotionPolicyTrainer():
         # visualize randomly selected rollout from the batch, with Q-values
         visualize_rollout_values(
             self.robot,
-            viz_sample,
             viz_rollout_q_nexts[:viz_rollout_length],
             viz_rollout_values[:viz_rollout_length],
             self.max_cumulative_reward,
             self.min_cumulative_reward
         )
-        # visualize_rollout_rewards(
-        #     self.robot,
-        #     viz_sample,
-        #     viz_rollout_q_nexts[:viz_rollout_length],
-        #     viz_rollout_rewards[:viz_rollout_length],
-        #     self.goal_reward,
-        #     self.collision_reward
-        # )
+
+    @torch.no_grad()
+    def rollout_rewards_visualization(
+        self,
+        batch: dict[str, torch.Tensor],
+        index: int | None = None,
+    ) -> None:
+        """
+        Rollout the actor policy and visualize the state transition values 
+        estimated by the critic.
+        """
+        q = batch["configuration"].clone()     # [B, DOF], normalized
+        B = q.size(0)
+        cuboids = TorchCuboids(batch["cuboid_centers"], batch["cuboid_dims"], batch["cuboid_quats"])
+        cylinders = TorchCylinders(batch["cylinder_centers"], batch["cylinder_radii"],
+                                batch["cylinder_heights"], batch["cylinder_quats"])
+
+        # point cloud for the actor input; will be updated only for active rows
+        pc = batch["point_cloud"].clone()
+        labels = batch["point_cloud_labels"]
+
+        active = torch.ones(B, dtype=torch.bool, device=q.device)
+        assert self.robot is not None
+        
+        if index is not None:
+            viz_idx = index
+        else:
+            viz_idx = int(torch.randint(0, B, ()).item())
+        
+        viz_rollout_q_nexts = torch.zeros(
+            (self.rollout_length, self.robot.MAIN_DOF), device=q.device, requires_grad=False)
+        viz_rollout_rewards = torch.zeros(
+            (self.rollout_length,), device=q.device, requires_grad=False)
+        viz_rollout_length = 0
+
+        for i in range(self.rollout_length):
+            if not active.any():
+                break
+
+            # actor action for active rows
+            q_act = q[active]
+            pc_act = pc[active]
+            lbl_act = labels[active]
+            qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [B, 1, DOF] or [B, DOF]
+            a = (qdeltas[:, -1, :] if qdeltas.dim()==3 else qdeltas)
+            a = a + torch.randn_like(a) * self.exploration_noise
+            if self.action_clip is not None:
+                a = torch.clamp(a, -self.action_clip, self.action_clip)
+            q_next = (q_act + a).clamp(-1, 1)
+            q_next_unn = self.robot.unnormalize_joints(q_next)
+
+            # termination & reward at q_next
+            reached = self._check_reaching_success(
+                q_next_unn,
+                batch["target_position"][active],
+                batch["target_orientation"][active])
+            collided = self._check_for_collisions(
+                q_next_unn, cuboids[active], cylinders[active])
+            done = reached | collided
+            r_t = torch.where(collided, self.collision_reward,
+                torch.where(reached, self.goal_reward, self.step_reward)).float().unsqueeze(1)
+
+            # map original batch index to compressed active indices
+            if bool(active[viz_idx].item()):
+                vi = int(active[:viz_idx].sum().item())
+                viz_rollout_q_nexts[i] = q_next[vi]
+                viz_rollout_rewards[i] = r_t[vi, 0]
+                viz_rollout_length += 1
+            else:
+                break
+
+            # update only those still active
+            still = ~done
+            if still.any():
+                samples = self._sample(q_next_unn[still])[..., :3] # [B_still, num_robot_points, 3]
+                pc_act[still, :samples.size(1)] = samples
+                q_act[still] = q_next[still]
+
+            # write back into full tensors
+            q[active] = q_act
+            pc[active] = pc_act
+
+            # mark finished rows inactive
+            tmp = active.nonzero(as_tuple=False).squeeze(1)
+            active[tmp] = still
+
+        # visualize randomly selected rollout from the batch, with Q-values
+        visualize_rollout_rewards(
+            self.robot,
+            viz_rollout_q_nexts[:viz_rollout_length],
+            viz_rollout_rewards[:viz_rollout_length],
+            self.goal_reward,
+            self.collision_reward
+        )
 
     @classmethod
     def load_from_checkpoint(
