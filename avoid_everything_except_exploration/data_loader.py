@@ -683,6 +683,7 @@ class DataModule:
         collision_reward: Optional[float] = None,
         step_reward: Optional[float] = None,
         reward_scale: Optional[float] = None,
+        shuffle: Optional[bool] = None,
     ):
         super().__init__()
         self.robot = Robot(urdf_path)
@@ -701,7 +702,7 @@ class DataModule:
         self.goal_reward = goal_reward * self.reward_scale if goal_reward is not None else 0.0
         self.collision_reward = collision_reward * self.reward_scale if collision_reward is not None else 0.0
         self.step_reward = step_reward * self.reward_scale if step_reward is not None else 0.0
-        
+        self.shuffle = shuffle if shuffle is not None else True
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -853,7 +854,7 @@ class DataModule:
             batch_size=self.train_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
-            shuffle=True,
+            shuffle=self.shuffle,
             persistent_workers=False if self.num_workers == 0 else True,
             drop_last=True,
         )
@@ -879,7 +880,7 @@ class DataModule:
             self.train_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
-            shuffle=True,
+            shuffle=self.shuffle,
             persistent_workers=False if self.num_workers == 0 else True,
             drop_last=True,
         )
@@ -895,43 +896,10 @@ class DataModule:
             self.val_batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
-            shuffle=True,
+            shuffle=self.shuffle,
             persistent_workers=False if self.num_workers == 0 else True,
             drop_last=True,
         )
-
-    def val_dataloaders(self) -> DataLoader:
-        """
-        A Pytorch lightning method to get the dataloaders for validation
-
-        :rtype DataLoader: The validation dataloader
-        """
-        loaders = [None, None, None, None]
-        loaders[DatasetType.VAL_STATE] = DataLoader(
-            self.data_val_state,
-            self.train_batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-        loaders[DatasetType.VAL] = DataLoader(
-            self.data_val,
-            self.val_batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-        loaders[DatasetType.MINI_TRAIN] = DataLoader(
-            self.data_mini_train,
-            self.val_batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-        loaders[DatasetType.VAL_PRETRAIN] = DataLoader(
-            self.data_val_pretrain,
-            self.val_batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-        return loaders
 
     def test_dataloader(self) -> DataLoader:
         """

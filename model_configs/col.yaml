@@ -50,6 +50,7 @@ data_module_parameters:
   num_target_points: 128
   random_scale: 0.015 # std deviation of the noise added to the expert configurations
   include_reward: true
+  shuffle: true
 
 shared_parameters:
   urdf_path: /workspace/assets/panda/panda_spheres.urdf
