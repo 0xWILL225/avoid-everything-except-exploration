@@ -150,6 +150,8 @@ def run():
         expert_loader=expert_loader, actor_replay=replay_buffer, async_prefetch=5
     )
     if config["load_model_from_checkpoint"]:
+        if is_rank_zero:
+            cprint(f"Loading model from checkpoint {config['load_checkpoint_path']}", "blue")
         trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
             config["load_checkpoint_path"],
             **(config["shared_parameters"] or {}),
@@ -157,6 +159,8 @@ def run():
             actor_only=config["load_actor_only"],
         )
     else:
+        if is_rank_zero:
+            cprint("Initializing new model", "blue")
         trainer = CoLMotionPolicyTrainer(
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),

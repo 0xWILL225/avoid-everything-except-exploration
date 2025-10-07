@@ -153,12 +153,16 @@ def run():
         expert_loader=expert_loader, actor_replay=replay_buffer, use_async=False # NOTE: temporarily disabled async - reenable for CoL
     )
     if config["load_model_from_checkpoint"]:
+        if is_rank_zero:
+            cprint(f"Loading model from checkpoint {config['load_checkpoint_path']}", "blue")
         trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
             config["load_checkpoint_path"],
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
         )
     else:
+        if is_rank_zero:
+            cprint("Initializing new model", "blue")
         trainer = CoLMotionPolicyTrainer(
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
