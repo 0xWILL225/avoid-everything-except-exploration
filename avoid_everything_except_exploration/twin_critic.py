@@ -61,13 +61,13 @@ class TwinCritic(nn.Module):
     Saves ~1x PointNet++ forward per step.
     """
     def __init__(self, 
-                 num_robot_points: int, 
+                 num_robot_points: int,
                  robot_dof: int,
-                 *, 
-                 feature_dim: int = 4, 
-                 n_heads: int = 4, # 4
-                 d_model: int = 512, # 256
-                 n_layers: int = 4, # 3
+                 *,
+                 feature_dim: int = 4, # match actor feature_dim
+                 n_heads: int = 4,
+                 d_model: int = 512,   # match actor d_model
+                 n_layers: int = 4,
                  dropout: float = 0.1):
         super().__init__()
         self.pc_encoder = MPiFormerPointNet(num_robot_points, feature_dim, d_model)

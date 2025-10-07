@@ -20,7 +20,7 @@ from avoid_everything_except_exploration.mpiformer import MotionPolicyTransforme
 from avoid_everything_except_exploration.twin_critic import TwinCritic
 from avoid_everything_except_exploration.loss import CoLLossFn
 from avoid_everything_except_exploration.replay import ReplayBuffer
-from avoid_everything_except_exploration.utils.visualization import visualize_rollout_rewards, visualize_rollout_values
+from avoid_everything_except_exploration.utils.visualization import visualize_problem, visualize_rollout_rewards, visualize_rollout_values
 
 
 class CoLMotionPolicyTrainer():
@@ -878,7 +878,7 @@ class CoLMotionPolicyTrainer():
         else:
             viz_idx = int(torch.randint(0, B, ()).item())
         
-        # viz_sample = {k: v[viz_idx] for k, v in batch.items()}
+        viz_sample = {k: v[viz_idx] for k, v in batch.items()}
         viz_rollout_q_nexts = torch.zeros(
             (self.rollout_length, self.robot.MAIN_DOF), device=q.device, requires_grad=False)
         viz_rollout_values = torch.zeros(
@@ -937,6 +937,7 @@ class CoLMotionPolicyTrainer():
             active[tmp] = still
 
         # visualize randomly selected rollout from the batch, with Q-values
+        # visualize_problem(self.robot, viz_sample)
         visualize_rollout_values(
             self.robot,
             viz_rollout_q_nexts[:viz_rollout_length],
@@ -1078,9 +1079,30 @@ class CoLMotionPolicyTrainer():
             elif "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
                 _load_actor_from_state_dict(ckpt["state_dict"])
             else:
-                maybe_sd = {k: v for k, v in ckpt.items() if isinstance(v, torch.Tensor)}
-                if maybe_sd:
-                    _load_actor_from_state_dict(maybe_sd)
+                sd = {k: v for k, v in ckpt.items() if isinstance(v, torch.Tensor)}
+                if sd:
+                    _load_actor_from_state_dict(sd)
+
+            # Also mirror the actor's point-cloud embedder weights into the critic's
+            # pc_encoder. Rely on strict state_dict load to validate dimension compatibility.
+            try:
+                actor_pc_encoder = trainer.actor.point_cloud_embedder
+                critic_pc_encoder = trainer.critic.pc_encoder
+            except AttributeError as e:
+                raise AttributeError(
+                    "Expected actor to have 'point_cloud_embedder' and critic to have 'pc_encoder'"
+                ) from e
+
+            try:
+                critic_pc_encoder.load_state_dict(
+                    actor_pc_encoder.state_dict(), strict=True
+                )
+            except RuntimeError as e:
+                raise RuntimeError(
+                    "Failed to load actor point-cloud embedder weights into critic pc_encoder. "
+                    "Ensure encoder hyperparameters match between actor and critic (e.g., "
+                    "num_robot_points, feature_dim, d_model). Original error: " + str(e)
+                ) from e
             return trainer
 
         loaded_any = False
