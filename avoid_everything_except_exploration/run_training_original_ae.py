@@ -46,8 +46,6 @@ from avoid_everything_except_exploration.col import CoLMotionPolicyTrainer
 from avoid_everything_except_exploration.data_loader import DataModule
 from avoid_everything_except_exploration.mixed_batch_provider import MixedBatchProvider
 from avoid_everything_except_exploration.replay import ReplayBuffer
-
-# from avoid_everything.loss import CollisionAndBCLossFn
 from avoid_everything_except_exploration.loss import CoLLossFn
 
 
@@ -155,12 +153,16 @@ def run():
         expert_loader=expert_loader, actor_replay=replay_buffer, use_async=False # NOTE: temporarily disabled async - reenable for CoL
     )
     if config["load_model_from_checkpoint"]:
+        if is_rank_zero:
+            cprint(f"Loading model from checkpoint {config['load_checkpoint_path']}", "blue")
         trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
             config["load_checkpoint_path"],
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
         )
     else:
+        if is_rank_zero:
+            cprint("Initializing new model", "blue")
         trainer = CoLMotionPolicyTrainer(
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
@@ -181,8 +183,6 @@ def run():
             "critic": trainer.critic,
             "target_actor": trainer.target_actor,
             "target_critic": trainer.target_critic,
-            "critic2": trainer.critic2,
-            "target_critic2": trainer.target_critic2,
         }.items():
             tot, tr = count_params(module)
             print(f"    {name:14s}  total={pretty_k(tot):>7}  trainable={pretty_k(tr):>7}")
@@ -198,7 +198,6 @@ def run():
     ):
         trainer.actor.eval()
         trainer.critic.eval()
-        trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
         val_bar = tqdm(
             total=total,
@@ -219,7 +218,6 @@ def run():
         val_bar.close()
         trainer.actor.train()
         trainer.critic.train()
-        trainer.critic2.train()
 
     def run_state_val_epoch(val_state_loader, max_val_batches=None):
         trainer.reset_state_val_metrics()
@@ -257,10 +255,6 @@ def run():
         )
 
         batch_idx = 0
-        # old_loss_fn = CollisionAndBCLossFn(
-        #     config["shared_parameters"]["urdf_path"],
-        #     config["training_model_parameters"]["collision_loss_margin"]
-        # )
         loss_fn = CoLLossFn(
             config["shared_parameters"]["urdf_path"],
             config["training_model_parameters"]["collision_loss_margin"]
@@ -403,19 +397,16 @@ def run():
                 ckpt_path = Path(save_dir) / f"fabric-epoch{epoch+1}-step{global_step}.ckpt"
                 fabric.save(str(ckpt_path), {
                     "actor": trainer.actor.state_dict(), 
-                    "critic": trainer.critic.state_dict(), 
-                    "critic2": trainer.critic2.state_dict(),
+                    "critic": trainer.critic.state_dict(),
                     "target_actor": trainer.target_actor.state_dict(),
                     "target_critic": trainer.target_critic.state_dict(),
-                    "target_critic2": trainer.target_critic2.state_dict(),
                     "actor_optim": trainer.actor_optim.state_dict(), 
                     "critic_optim": trainer.critic_optim.state_dict(),
-                    "critic2_optim": trainer.critic2_optim.state_dict(),
                     "actor_sch": trainer.actor_scheduler.state_dict(),
                     "critic_sch": trainer.critic_scheduler.state_dict(),
-                    "critic2_sch": trainer.critic2_scheduler.state_dict()
                 },)
-                cprint(f"Saved checkpoint to {ckpt_path}", "green")
+                if is_rank_zero:
+                    cprint(f"Saved checkpoint to {ckpt_path}", "green")
                 last_ckpt_time = time.time()
 
             global_step += 1

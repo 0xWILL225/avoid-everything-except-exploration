@@ -40,7 +40,6 @@ training_model_parameters:
   grad_clip_norm: 1.0      # gradient clipping norm
   rollout_length: 69       # number of steps to rollout for the actor
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]  # bounds for the point clouds
-  vizualization: true
   
 data_module_parameters:
   data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
