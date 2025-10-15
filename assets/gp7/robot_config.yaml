@@ -1,5 +1,5 @@
 robot_config:
-  tcp_link_name: "tool_center_point"    # defines the pose of the tool center point
+  tcp_link_name: "tool_center_point"   # link name of the tool center point
   base_link_name: "Base"
   eef_links: ["flange", "torch", "tool_center_point"] # links belonging to the end effector (only fixed or auxiliary joints between them)
   auxiliary_joint_names: []  # joints not controlled by neural network
