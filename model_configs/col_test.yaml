@@ -50,7 +50,7 @@ data_module_parameters:
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
-  random_scale: 0.015 # std deviation of the noise added to the expert configurations
+  random_scale: 0.015 # std deviation of the noise added to the expert configurations (not in normalized config space, not to supervision configs)
   num_target_points: 128
   include_reward: true
   shuffle: true

@@ -45,7 +45,9 @@ def run(cfg_path):
     print("Funnel Collision Rate:", f"{trainer.val_funnel_collision_rate.compute().item():.2%}")
     print("Reaching Success Rate:", f"{trainer.val_reaching_success_rate.compute().item():.2%}")
     print("Success Rate:", f"{trainer.val_success_rate.compute().item():.2%}")
-    print("Waypoint Count:", f"{trainer.val_waypoint_count.compute().item():.2f}")
+    print("Mean Waypoint Count:", f"{trainer.val_waypoint_count.compute().item():.2f}")
+    print("Mean Step Size, unnormalized:", f"{trainer.val_step_size_unnorm.compute().item():.3f}")
+    print("Mean Step Size, normalized:", f"{trainer.val_step_size_norm.compute().item():.3f}")
     print(
         "Target Position Error:",
         f"{100 * trainer.val_position_error.compute().item():.2}cm",

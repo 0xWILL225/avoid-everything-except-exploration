@@ -97,6 +97,8 @@ class CoLMotionPolicyTrainer():
         self.val_reaching_success_rate = torchmetrics.MeanMetric()
         self.val_success_rate = torchmetrics.MeanMetric() # reaching success without collision
         self.val_waypoint_count = torchmetrics.MeanMetric() # number of waypoints in successful reaches
+        self.val_step_size_unnorm = torchmetrics.MeanMetric()
+        self.val_step_size_norm = torchmetrics.MeanMetric()
         self.val_point_match_loss = torchmetrics.MeanMetric()
         self.val_collision_loss = torchmetrics.MeanMetric()
         self.val_loss = torchmetrics.MeanMetric()
@@ -232,7 +234,8 @@ class CoLMotionPolicyTrainer():
         for m in [self.val_position_error, self.val_orientation_error,
                   self.val_collision_rate, self.val_funnel_collision_rate,
                   self.val_reaching_success_rate, self.val_success_rate,
-                  self.val_waypoint_count,
+                  self.val_waypoint_count, self.val_step_size_unnorm,
+                  self.val_step_size_norm,
                   self.val_point_match_loss, self.val_collision_loss,
                   self.val_loss]:
             m.to(self.device)
@@ -463,7 +466,7 @@ class CoLMotionPolicyTrainer():
 
         active = torch.ones(B, dtype=torch.bool, device=q.device)
         assert self.robot is not None
-        for i in range(self.rollout_length):
+        for _ in range(self.rollout_length):
             if not active.any():
                 break
 
@@ -599,6 +602,8 @@ class CoLMotionPolicyTrainer():
         self.val_reaching_success_rate.reset()
         self.val_success_rate.reset()
         self.val_waypoint_count.reset()
+        self.val_step_size_unnorm.reset()
+        self.val_step_size_norm.reset()
 
     def compute_rollout_val_metrics(self) -> Dict[str, float]:
         return {
@@ -609,6 +614,8 @@ class CoLMotionPolicyTrainer():
             "val_reaching_success_rate": float(self.val_reaching_success_rate.compute().item()),
             "val_success_rate":          float(self.val_success_rate.compute().item()),
             "val_waypoint_count":        float(self.val_waypoint_count.compute().item()),
+            "val_step_size_unnorm":  float(self.val_step_size_unnorm.compute().item()),
+            "val_step_size_norm":    float(self.val_step_size_norm.compute().item()),
         }
 
     def rollout(
@@ -627,14 +634,13 @@ class CoLMotionPolicyTrainer():
         :param sampler Callable[[torch.Tensor], torch.Tensor]: A function that takes a batch of robot
                                                                configurations [B x self.robot.MAIN_DOF] and returns a batch of
                                                                point clouds samples on the surface of that robot
-        :param unnormalize bool: Whether to return the whole trajectory unnormalized
-                                 (i.e. converted back into joint space)
-        :rtype list[torch.Tensor]: The entire trajectory batch, i.e. a list of
-                                   configuration batches including the starting
-                                   configurations where each element in the list
-                                   corresponds to a timestep. For example, the
-                                   first element of each batch in the list would
-                                   be a single trajectory.
+        
+        :rtype torch.Tensor: The entire trajectory batch, i.e. a tensor of
+                             unnormalized configuration batches including the 
+                             starting configurations where each element in the 
+                             tensor corresponds to a timestep. For example, the
+                             first element of each batch in the tensor would
+                             be a single trajectory.
         """
         point_cloud_labels, point_cloud, q = (
             batch["point_cloud_labels"],
@@ -849,6 +855,29 @@ class CoLMotionPolicyTrainer():
             torch.logical_and(~has_collision, has_reaching_success).float().detach()
         )
         self.val_waypoint_count.update((lengths[has_reaching_success]).float())
+
+        # Average step size between consecutive configurations (masked to valid steps)
+        T = rollouts.size(1)
+        if T > 1:
+            # Build mask over steps (t -> t+1) that occur before "lengths" per rollout
+            step_idx = torch.arange(T - 1, device=rollouts.device).unsqueeze(0)  # [1, T-1]
+            step_mask = step_idx < lengths.unsqueeze(1)  # [B, T-1]
+
+            # Unnormalized step sizes
+            deltas_unn = rollouts[:, 1:, :] - rollouts[:, :-1, :]  # [B, T-1, D]
+            step_norms_unn = torch.norm(deltas_unn, dim=-1)  # [B, T-1]
+            valid_unn = step_norms_unn[step_mask]
+            if valid_unn.numel() > 0:
+                self.val_step_size_unnorm.update(valid_unn)
+
+            # Normalized step sizes (normalize each configuration, then difference)
+            assert self.robot is not None
+            rollouts_norm = self.robot.normalize_joints(rollouts)
+            deltas_norm = rollouts_norm[:, 1:, :] - rollouts_norm[:, :-1, :]  # [B, T-1, D]
+            step_norms_norm = torch.norm(deltas_norm, dim=-1)  # [B, T-1]
+            valid_norm = step_norms_norm[step_mask]
+            if valid_norm.numel() > 0:
+                self.val_step_size_norm.update(valid_norm)
 
     @torch.no_grad()
     def rollout_value_visualization(

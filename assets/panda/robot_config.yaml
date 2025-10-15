@@ -1,5 +1,5 @@
 robot_config:
-  tcp_link_name: "right_gripper"    # defines the pose of the tool center point
+  tcp_link_name: "right_gripper"    # link name of the tool center point
   base_link_name: "panda_link0"
   eef_links: ["panda_link8", "panda_hand", "panda_grasptarget", "right_gripper", "panda_leftfinger", "panda_rightfinger"] # links belonging to the end effector
   auxiliary_joint_names: ["panda_finger_joint1", "panda_finger_joint2"]  # joints not controlled by neural network
