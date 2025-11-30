@@ -30,6 +30,8 @@ def run(cfg_path):
     dm.setup("fit")
     dl = fabric.setup_dataloaders(dm.val_trajectory_dataloader(), move_to_device=True)
 
+    print(f"Loading checkpoint from {cfg['load_checkpoint_path']}")
+
     trainer = CoLMotionPolicyTrainer.load_from_checkpoint(
         cfg["load_checkpoint_path"],
         **cfg["training_model_parameters"],

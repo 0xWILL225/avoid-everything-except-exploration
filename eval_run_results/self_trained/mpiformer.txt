@@ -1,0 +1,12 @@
+Checkpoint: /workspace/checkpoints/jqxqskq7-self-pretrained-franka2/best-fabric-epoch2-step572470.ckpt
+Robot: Franka Panda
+---
+Collision Rate: 14.72%
+Funnel Collision Rate: 14.65%
+Reaching Success Rate: 99.65%
+Success Rate: 85.05%
+Mean Waypoint Count: 27.82
+Mean Step Size, unnormalized: 0.158
+Mean Step Size, normalized: 0.061
+Target Position Error: 0.64cm
+Target Orientation Error: 2.7°

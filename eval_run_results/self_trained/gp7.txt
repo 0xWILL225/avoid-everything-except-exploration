@@ -1,0 +1,12 @@
+Checkpoint: /workspace/checkpoints/xuzop0ys-gp7/best-fabric-epoch13-step1000000.ckpt
+Robot: Yaskawa GP7
+---
+Collision Rate: 60.18%
+Funnel Collision Rate: 42.93%
+Reaching Success Rate: 5.72%
+Success Rate: 3.26%
+Mean Waypoint Count: 31.38
+Mean Step Size, unnormalized: 0.190
+Mean Step Size, normalized: 0.068
+Target Position Error: 8.7cm
+Target Orientation Error: 3.9e+01° (39°)

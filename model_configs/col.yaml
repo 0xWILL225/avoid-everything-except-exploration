@@ -21,7 +21,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 training_model_parameters:
-  robot_dof: 7  # robot's degrees of freedom
+  # robot_dof: 7  # robot's degrees of freedom
+  robot_dof: 6  # robot's degrees of freedom
   point_match_loss_weight: 1.0  # point match loss (BC loss) weight for actor
   collision_loss_weight: 5.0    # collision loss weight (only for validation in CoL)
   collision_loss_margin: 0.03   # margin for collision loss [m]
@@ -42,8 +43,9 @@ training_model_parameters:
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]  # bounds for the point clouds
   
 data_module_parameters:
-  #data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
-  data_dir: /workspace/datasets/one_fourth_density_cubby
+  # data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
+  # data_dir: /workspace/datasets/sixteenth_cubby
+  data_dir: /workspace/datasets/gp7_cubby_data
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
@@ -53,8 +55,8 @@ data_module_parameters:
   shuffle: true
 
 shared_parameters:
-  urdf_path: /workspace/assets/panda/panda_spheres.urdf
-  # urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
+  # urdf_path: /workspace/assets/panda/panda_spheres.urdf
+  urdf_path: /workspace/assets/gp7/gp7_spheres.urdf
   num_robot_points: 2048
   goal_reward: 1.0       # reward for reaching the goal
   collision_reward: -1.0  # reward for colliding with an obstacle
@@ -83,7 +85,7 @@ mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb
 load_model_from_checkpoint: false
 load_actor_only: true
-load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt # PATH/TO/PRETRAINING/CHECKPOINT
+load_checkpoint_path: /workspace/checkpoints/xuzop0ys-gp7/best-fabric-epoch13-step1000000.ckpt # PATH/TO/PRETRAINING/CHECKPOINT
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Original AE: 1/4 density expert"
-description: "Original AE run with intermediate expert waypoints removed"
+experiment_name: "---"
+description: "---"
