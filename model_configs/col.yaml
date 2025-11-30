@@ -43,7 +43,7 @@ training_model_parameters:
   
 data_module_parameters:
   #data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
-  data_dir: /workspace/datasets/sparsified_cubby_set
+  data_dir: /workspace/datasets/one_fourth_density_cubby
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
@@ -85,5 +85,5 @@ load_model_from_checkpoint: false
 load_actor_only: true
 load_checkpoint_path: /workspace/checkpoints/mpiformer_cubby.ckpt # PATH/TO/PRETRAINING/CHECKPOINT
 save_checkpoint_dir: /workspace/checkpoints
-experiment_name: "Original AE: Half density expert"
-description: "Original AE run with every other expert waypoint removed"
+experiment_name: "Original AE: 1/4 density expert"
+description: "Original AE run with intermediate expert waypoints removed"
