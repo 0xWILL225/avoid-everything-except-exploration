@@ -89,6 +89,8 @@ class CoLMotionPolicyTrainer():
         self.use_huber_loss = use_huber_loss
         self.tau = tau
         self.grad_clip_norm = grad_clip_norm
+        # Cached per-joint half-range tensor, initialized once setup() builds the robot.
+        self._joint_range_half: torch.Tensor | None = None
 
         self.val_position_error = torchmetrics.MeanMetric()
         self.val_orientation_error = torchmetrics.MeanMetric()
@@ -197,6 +199,43 @@ class CoLMotionPolicyTrainer():
         assert next(self.actor.parameters()).device == next(self.target_critic.parameters()).device
         return next(self.actor.parameters()).device
 
+    def _apply_noise_in_joint_space(
+        self,
+        normalized_action: torch.Tensor,
+        noise_std: float,
+        noise_clip: float | None = None,
+        clamp_unnormalized: float | None = None,
+    ) -> torch.Tensor:
+        """
+        Convert normalized deltas to real joint space, add/clamp noise there, 
+        return normalized result.
+
+        :param normalized_action: The normalized action to apply noise to.
+        :param noise_std: The standard deviation of the noise in joint space.
+        :param noise_clip: The clip value for the noise in joint space.
+        :param clamp_unnormalized: The clamp value for the unnormalized action in joint space.
+        :return: The normalized action with noise applied (normalize joint space).
+        """
+        if noise_std <= 0 and clamp_unnormalized is None:
+            return normalized_action
+        assert self.robot is not None
+        assert self._joint_range_half is not None
+        joint_range_half = self._joint_range_half.to(dtype=normalized_action.dtype, device=normalized_action.device)
+        while joint_range_half.dim() < normalized_action.dim():
+            joint_range_half = joint_range_half.unsqueeze(0)
+
+        action_unn = normalized_action * joint_range_half
+        if noise_std > 0:
+            noise = torch.randn_like(action_unn) * noise_std
+            if noise_clip is not None:
+                noise = torch.clamp(noise, -noise_clip, noise_clip)
+            action_unn = action_unn + noise
+
+        if clamp_unnormalized is not None:
+            action_unn = torch.clamp(action_unn, -clamp_unnormalized, clamp_unnormalized)
+
+        return action_unn / joint_range_half
+
     def setup(self, fabric: Fabric):
         """
         Device-critical initialization. Call after moving model to the desired 
@@ -229,6 +268,10 @@ class CoLMotionPolicyTrainer():
         # never need gradients for target networks
         self.target_actor.eval()
         self.target_critic.eval()
+
+        # pre-compute joint range half for efficient action noise application
+        joint_limits = torch.as_tensor(self.robot.main_joint_limits, dtype=torch.float32, device=self.device)
+        self._joint_range_half = 0.5 * (joint_limits[:, 1] - joint_limits[:, 0])
 
         # move all metrics to the same device
         for m in [self.val_position_error, self.val_orientation_error,
@@ -334,12 +377,12 @@ class CoLMotionPolicyTrainer():
             a_next = self.target_actor(batch["point_cloud_labels"], next_pc, q_next, self.pc_bounds)
             if a_next.dim() == 3:
                 a_next = a_next[:, -1, :]
-            # add clipped gaussian target actor noise [TD3]
-            a_next = a_next + torch.clamp(torch.randn_like(a_next) * self.target_actor_noise,
-                                        -self.target_actor_noise_clip,
-                                        self.target_actor_noise_clip)
-            if self.action_clip is not None:
-                a_next = torch.clamp(a_next, -self.action_clip, self.action_clip)
+            a_next = self._apply_noise_in_joint_space(
+                a_next,
+                noise_std=self.target_actor_noise,
+                noise_clip=self.target_actor_noise_clip,
+                clamp_unnormalized=self.action_clip,
+            )
 
         with torch.no_grad():
             q_next_target, q_next_target2 = self.target_critic(
@@ -476,7 +519,11 @@ class CoLMotionPolicyTrainer():
             lbl_act = labels[active]
             qdeltas = self.actor(lbl_act, pc_act, q_act, self.pc_bounds)  # [B, 1, DOF] or [B, DOF]
             a = (qdeltas[:, -1, :] if qdeltas.dim()==3 else qdeltas)
-            a = a + torch.randn_like(a) * self.exploration_noise
+            a = self._apply_noise_in_joint_space(
+                a,
+                noise_std=self.exploration_noise,
+            )
+
             if self.action_clip is not None:
                 a = torch.clamp(a, -self.action_clip, self.action_clip)
             q_next = (q_act + a).clamp(-1, 1)
@@ -1112,11 +1159,12 @@ class CoLMotionPolicyTrainer():
                 if sd:
                     _load_actor_from_state_dict(sd)
 
-            # Also mirror the actor's point-cloud embedder weights into the critic's
+            # Also mirror the actor's point-cloud embedder weights into the critic's (and target critic's)
             # pc_encoder. Rely on strict state_dict load to validate dimension compatibility.
             try:
                 actor_pc_encoder = trainer.actor.point_cloud_embedder
                 critic_pc_encoder = trainer.critic.pc_encoder
+                target_critic_pc_encoder = trainer.target_critic.pc_encoder
             except AttributeError as e:
                 raise AttributeError(
                     "Expected actor to have 'point_cloud_embedder' and critic to have 'pc_encoder'"
@@ -1124,6 +1172,9 @@ class CoLMotionPolicyTrainer():
 
             try:
                 critic_pc_encoder.load_state_dict(
+                    actor_pc_encoder.state_dict(), strict=True
+                )
+                target_critic_pc_encoder.load_state_dict(
                     actor_pc_encoder.state_dict(), strict=True
                 )
             except RuntimeError as e:

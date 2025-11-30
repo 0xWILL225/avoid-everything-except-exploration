@@ -2,12 +2,7 @@
 Mixed batch sampling utilities for Cycle-of-Learning.
 
 This module streams expert transitions from a DataLoader and mixes them with
-actor transitions sampled from a replay sampler. It is designed to:
-
-- Avoid storing the full expert dataset in memory
-- Keep batches consistent with the dict[str, torch.Tensor] schema expected by training
-- Support a pretraining phase (100% expert) and a CoL phase
-  (1 / expert_fraction_denom expert, remainder from actor replay)
+actor transitions sampled from a replay sampler.
 """
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
