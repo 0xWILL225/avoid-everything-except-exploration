@@ -359,7 +359,7 @@ class TrajectoryDataset(Base):
             config_tensor = torch.as_tensor(config).float()
 
             if self.train:
-                # Add slight random noise to the joints
+                # Add slight random noise to the joints (in non-normalized joint space)
                 randomized = (
                     self.random_scale * torch.randn(config_tensor.shape) + config_tensor
                 )
@@ -479,7 +479,7 @@ class StateDataset(Base):
             config_tensor = torch.as_tensor(config).float()
 
             if self.train:
-                # Add slight random noise to the joints
+                # Add slight random noise to the joints (in non-normalized joint space)
                 randomized = (
                     self.random_scale * torch.randn(config_tensor.shape) + config_tensor
                 )
@@ -613,7 +613,7 @@ class StateRewardDataset(Base):
             config_tensor = torch.as_tensor(config).float()
 
             if self.train:
-                # Add slight random noise to the joints
+                # Add slight random noise to the joints (in non-normalized joint space)
                 randomized = (
                     self.random_scale * torch.randn(config_tensor.shape) + config_tensor
                 )

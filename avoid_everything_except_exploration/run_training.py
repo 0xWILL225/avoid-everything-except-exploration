@@ -181,8 +181,6 @@ def run():
             "critic": trainer.critic,
             "target_actor": trainer.target_actor,
             "target_critic": trainer.target_critic,
-            # "critic2": trainer.critic2,
-            # "target_critic2": trainer.target_critic2,
         }.items():
             tot, tr = count_params(module)
             print(f"    {name:14s}  total={pretty_k(tot):>7}  trainable={pretty_k(tr):>7}")
@@ -198,7 +196,6 @@ def run():
     ):
         trainer.actor.eval()
         trainer.critic.eval()
-        # trainer.critic2.eval()
         total = len(loader) if max_batches is None else min(max_batches, len(loader))
         val_bar = tqdm(
             total=total,
@@ -219,7 +216,6 @@ def run():
         val_bar.close()
         trainer.actor.train()
         trainer.critic.train()
-        # trainer.critic2.train()
 
     def run_state_val_epoch(val_state_loader, max_val_batches=None):
         trainer.reset_state_val_metrics()

@@ -1,0 +1,13 @@
+
+Checkpoint: /workspace/checkpoints/75a52w4h-half-density/best-fabric-epoch4-step770000.ckpt
+Robot: Franka Panda
+---
+Collision Rate: 7.17%
+Funnel Collision Rate: 7.16%
+Reaching Success Rate: 99.96%
+Success Rate: 92.80%
+Mean Waypoint Count: 14.43
+Mean Step Size, unnormalized: 0.306
+Mean Step Size, normalized: 0.117
+Target Position Error: 0.58cm
+Target Orientation Error: 2.6°

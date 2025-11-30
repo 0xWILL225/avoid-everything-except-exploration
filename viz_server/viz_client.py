@@ -520,6 +520,8 @@ def publish_ghost_robot(
         [r, g, b] color values in 0-1 range (default green)
     alpha : float
         Alpha/transparency value in 0-1 range (0=transparent, 1=opaque)
+    index : int
+        Index of the ghost robot (used for multiple ghost robots)
 
     """
     if color is None:
