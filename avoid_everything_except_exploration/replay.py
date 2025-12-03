@@ -104,7 +104,9 @@ class ReplayBuffer:
                 self.done[sl2].copy_(done[first:],    non_blocking=True)
 
             self.ptr  = end % self.capacity
-            self.full = self.full or (self.ptr == 0)
+            # Mark as full once we've written at least `capacity` entries total,
+            # even if the write did not land exactly on ptr == 0.
+            self.full = self.full or (end >= self.capacity)
 
     def __len__(self):
         return self.capacity if self.full else self.ptr

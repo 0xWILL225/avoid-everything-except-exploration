@@ -24,7 +24,7 @@ training_model_parameters:
   robot_dof: 7  # robot's degrees of freedom
   # robot_dof: 6  # robot's degrees of freedom
   point_match_loss_weight: 1.0  # point match loss (BC loss) weight for actor
-  collision_loss_weight: 5.0    # collision loss weight (only for validation in CoL)
+  collision_loss_weight: 5.0    # collision loss weight
   collision_loss_margin: 0.03   # margin for collision loss [m]
   actor_loss_weight: 0.001      # RL actor loss weight (try to match point match loss magnitude)
   min_lr: 1.0e-5
@@ -44,8 +44,6 @@ training_model_parameters:
   
 data_module_parameters:
   data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
-  # data_dir: /workspace/datasets/sixteenth_cubby
-  # data_dir: /workspace/datasets/gp7_cubby_data
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
@@ -65,12 +63,12 @@ shared_parameters:
 
 num_workers: 16                      # number of CPU workers for the data loaders
 checkpoint_interval: 60              # how often to save model checkpoints [minutes]
-pretraining_steps: 10000            # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
-start_using_actor_loss: 10000        # number of steps to wait before actor loss activates
+pretraining_steps: 20000            # how many steps to pretrain for before starting to sample from actor's replay buffer [global steps]
+start_using_actor_loss: 20000        # number of steps to wait before actor loss activates
 validate_every_n_steps: 10000        # how often to run mid-epoch validation epochs [global steps]
 collect_rollouts_every_n_steps: 500  # how often to collect actor rollouts for the replay buffer [global steps]
 log_every_n_steps: 50                # how often to log metrics to wandb [global steps]
-replay_buffer_capacity: 100000       # capacity of the replay buffer [number of transitions]
+replay_buffer_capacity: 200000       # capacity of the replay buffer [number of transitions]
 n_gpus: 2                            # number of GPUs to use for training
 train_batch_size: 50                 # batch size for training
 val_batch_size: 50                   # batch size for validation
@@ -84,8 +82,8 @@ max_epochs: 100                      # maximum number of epochs to train for
 mintest: false                       # true: run minimal test run for debugging
 logging: true                        # true: log to wandb
 load_model_from_checkpoint: true
-load_actor_only: false
-load_checkpoint_path: /workspace/checkpoints/birg7cuj/fabric-epoch1-step99701.ckpt # PATH/TO/PRETRAINING/CHECKPOINT
+load_actor_only: true
+load_checkpoint_path: /workspace/checkpoints/jqxqskq7-self-pretrained-franka2/best-fabric-epoch2-step572470.ckpt # PATH/TO/PRETRAINING/CHECKPOINT
 save_checkpoint_dir: /workspace/checkpoints
 experiment_name: "CoL: Avoid Everything Except Exploration"
-description: "Full CoL run with Franka Panda continued"
+description: "Full CoL run with Franka Panda - collision loss on"
