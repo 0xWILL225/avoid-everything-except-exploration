@@ -326,12 +326,28 @@ class CoLMotionPolicyTrainer():
         """
         assert self.robot is not None
         q_next_unn = self.robot.unnormalize_joints(q_next)
-        loss_bc = self.loss_fun.bc_pointcloud_loss(
+        return self.loss_fun.bc_pointcloud_loss(
             pred_q_unnorm=self.robot.unnormalize_joints(q_pred),
             expert_q_unnorm=q_next_unn,
             is_expert=is_expert,
         )
-        return loss_bc
+
+    def _collision_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Collision loss
+        """
+        q_next = batch["next_configuration"]
+        assert self.robot is not None
+        return self.loss_fun.collision_loss(
+            unnormalized_q=self.robot.unnormalize_joints(q_next),
+            cuboid_centers=batch["cuboid_centers"],
+            cuboid_dims=batch["cuboid_dims"],
+            cuboid_quaternions=batch["cuboid_quats"],
+            cylinder_centers=batch["cylinder_centers"],
+            cylinder_radii=batch["cylinder_radii"],
+            cylinder_heights=batch["cylinder_heights"],
+            cylinder_quaternions=batch["cylinder_quats"],
+        )
 
     def _actor_loss(
         self,
@@ -451,14 +467,19 @@ class CoLMotionPolicyTrainer():
         loss_bc = self._bc_loss(q_pred, batch["next_configuration"], batch["is_expert"])
         metrics["point_match_loss"] = float(loss_bc.detach().item())
 
+        collision_loss = self._collision_loss(batch)
+        metrics["collision_loss"] = float(collision_loss.detach().item())
+
         # actor update on critic-guided actor loss (+ optional BC)
         if use_actor_loss:
             loss_actor = self._actor_loss(pc_labels, pc, q, a_pred)
             metrics["actor_loss"] = float(loss_actor.detach().item())
             actor_total = (self.point_match_loss_weight * loss_bc +
+                            self.collision_loss_weight * collision_loss +
                             self.actor_loss_weight * loss_actor)
         else:
-            actor_total = self.point_match_loss_weight * loss_bc
+            actor_total = (self.point_match_loss_weight * loss_bc +
+                           self.collision_loss_weight * collision_loss)
 
         self.actor_optim.zero_grad(set_to_none=True)
         fabric.backward(actor_total)

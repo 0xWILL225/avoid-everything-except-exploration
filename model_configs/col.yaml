@@ -23,7 +23,7 @@
 training_model_parameters:
   robot_dof: 7  # robot's degrees of freedom
   point_match_loss_weight: 1.0  # point match loss (BC loss) weight for actor
-  collision_loss_weight: 5.0    # collision loss weight (only for validation in CoL)
+  collision_loss_weight: 5.0    # collision loss weight
   collision_loss_margin: 0.03   # margin for collision loss [m]
   actor_loss_weight: 0.01       # RL actor loss weight
   min_lr: 1.0e-5
@@ -42,8 +42,8 @@ training_model_parameters:
   pc_bounds: [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]  # bounds for the point clouds
   
 data_module_parameters:
-  #data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
-  data_dir: /workspace/datasets/one_fourth_density_cubby
+  data_dir: /workspace/datasets/ae_aristotle1_5mm_cubbies
+  # data_dir: /workspace/datasets/one_fourth_density_cubby
   train_trajectory_key: "global_solutions"
   val_trajectory_key: "global_solutions"
   num_obstacle_points: 4096
