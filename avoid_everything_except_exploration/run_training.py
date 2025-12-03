@@ -144,10 +144,19 @@ def run():
         robot_dof=config["training_model_parameters"]["robot_dof"],
         num_robot_points=config["shared_parameters"]["num_robot_points"],
         num_target_points=config["data_module_parameters"]["num_target_points"],
-        dataset=dm.data_train
+        dataset=dm.data_train,
     )
     mixed_provider = MixedBatchProvider(
-        expert_loader=expert_loader, actor_replay=replay_buffer, async_prefetch=5
+        expert_loader=expert_loader,
+        actor_replay=replay_buffer,
+        # NOTE:
+        # Async replay uses a background thread that performs CUDA ops.
+        # In multi-GPU (DDP) runs this can interact badly with NCCL and
+        # cause collective operation timeouts when ranks desync.
+        # To avoid CUDA work from non-main threads in distributed runs,
+        # disable async replay whenever more than one GPU is used.
+        use_async=(config["n_gpus"] == 1),
+        async_prefetch=5,
     )
     if config["load_model_from_checkpoint"]:
         if is_rank_zero:
